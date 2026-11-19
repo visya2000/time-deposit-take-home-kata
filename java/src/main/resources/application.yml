@@ -16,7 +16,7 @@ spring:
     properties:
       hibernate:
         jdbc:
-          batch_size: 500  # balance updates are flushed as batched UPDATEs
+          batch_size: ${interest.update.chunk-size}  # one JDBC batch per balance-update chunk
         order_updates: true
         query:
           # Never paginate a fetch join in memory (loads every row); fail instead.

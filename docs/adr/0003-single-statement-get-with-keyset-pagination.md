@@ -21,7 +21,8 @@ invite N+1 queries. Returning everything does not scale.
   rel="next"` when more data exists. Same array body in both modes, no total count.
 - The `Link` target is path-absolute: an absolute URL built from the request would take
   scheme and host from headers (wrong behind a proxy) and re-encode other parameters; a
-  query-only reference is mis-resolved by some clients (`java.net.URI.resolve`).
+  query-only reference is mis-resolved by some clients (`java.net.URI.resolve`). Trade-off: it is
+  relative to the server root, so a context path or proxy path prefix is not included.
 
 ## Consequences
 

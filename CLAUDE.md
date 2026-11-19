@@ -10,7 +10,9 @@ Time Deposit refactoring kata. **Only the `java/` module is in scope** — ignor
   of any kind (a hook blocks Edit/Write; do not work around it via shell commands).
 - `TimeDepositCalculator`:
   - keep `public void updateBalance(List<TimeDeposit>)` signature and the no-arg constructor;
-  - its observable behaviour must stay identical (README: "functioning correctly");
+  - its observable behaviour must stay identical (README: "functioning correctly") — sole
+    approved exception: a `null` plan type is treated as unknown instead of throwing
+    (PLAN.md decision 22);
   - keep `double` arithmetic and the existing operand order (`balance * rate / 12`) and rounding
     (`new BigDecimal(double).setScale(2, HALF_UP)`) — switching to BigDecimal maths changes results.
 - Exactly two REST endpoints: `GET /time-deposits` (optional keyset pagination `limit`/`afterId`,

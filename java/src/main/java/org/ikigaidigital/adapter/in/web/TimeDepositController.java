@@ -54,8 +54,9 @@ class TimeDepositController implements TimeDepositsApi {
 
     /**
      * RFC 8288 link to the next page as a path-absolute reference ("/time-deposits?afterId=..&limit=.."):
-     * no scheme or host taken from request headers (correct behind a reverse proxy, no Host-header
-     * injection), and no other request parameter is copied (or re-encoded).
+     * no scheme or host taken from request headers (no wrong host behind a reverse proxy, no
+     * Host-header injection), and no other request parameter is copied (or re-encoded). Relative to
+     * the server root: a servlet context path or proxy path prefix is not included (none is used).
      */
     private static String nextPageLink(int lastId, int pageSize) {
         String reference = UriComponentsBuilder.fromPath(PATH_GET_TIME_DEPOSITS)

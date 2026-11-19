@@ -153,6 +153,10 @@ Ambiguities in the requirements, resolved as follows (also commented in the code
   negative `afterId` is passed; it is listed by the GET without parameters.
 - Deposits locked by another transaction during a run are skipped and processed by the next run
   (at most one day late).
+- Deposits that never earn interest (unknown plan, student plan after one year, balances whose
+  interest rounds to 0.00) stay due, so every run re-evaluates and briefly locks them.
+- The `Link` header is relative to the server root; a servlet context path or reverse-proxy path
+  prefix would not be included (none is used).
 
 ## Possible enhancements
 

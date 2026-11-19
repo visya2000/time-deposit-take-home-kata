@@ -139,6 +139,10 @@
                                 <annotationLibrary>none</annotationLibrary>
                                 <documentationProvider>none</documentationProvider>
                                 <openApiNullable>false</openApiNullable>
+                                <!-- Explicit defaults (silence generator warnings): JSON null handling
+                                     stays with the global ObjectMapper. -->
+                                <generateJsonIncludeAnnotations>false</generateJsonIncludeAnnotations>
+                                <generateJsonSetterNullsAnnotations>false</generateJsonSetterNullsAnnotations>
                                 <!-- Reproducible generated sources. -->
                                 <hideGenerationTimestamp>true</hideGenerationTimestamp>
                             </configOptions>

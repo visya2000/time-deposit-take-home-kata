@@ -41,14 +41,12 @@ class InMemoryTimeDepositRepository implements TimeDepositRepository {
     }
 
     /** Adds a deposit without withdrawals whose interest was never applied. */
-    InMemoryTimeDepositRepository add(int id, String planType, String balance, int days) {
-        return add(id, planType, balance, days, null);
+    void add(int id, String planType, String balance, int days) {
+        add(id, planType, balance, days, null);
     }
 
-    InMemoryTimeDepositRepository add(int id, String planType, String balance, int days,
-                                      LocalDate lastInterestAppliedOn) {
+    void add(int id, String planType, String balance, int days, LocalDate lastInterestAppliedOn) {
         rows.put(id, new Row(id, planType, new BigDecimal(balance), days, lastInterestAppliedOn, List.of()));
-        return this;
     }
 
     BigDecimal balanceOf(int id) {
