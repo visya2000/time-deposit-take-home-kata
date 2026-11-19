@@ -1,0 +1,107 @@
+openapi: 3.0.3
+info:
+  title: XA Bank Time Deposits
+  version: 1.0.0
+  description: |
+    Time deposits with their withdrawals, and the monthly interest update.
+    Exactly two endpoints. This file is the contract: the server interface is generated from it
+    and Swagger UI serves it as is.
+tags:
+  - name: time-deposits
+paths:
+  /time-deposits:
+    get:
+      tags: [time-deposits]
+      operationId: getTimeDeposits
+      summary: List time deposits with their withdrawals
+      description: |
+        Without parameters, returns **all** time deposits ordered by id.
+
+        Optional keyset pagination: with `limit` and/or `afterId`, returns at most `limit`
+        deposits with `id > afterId`, ordered by id (`afterId` defaults to the start, `limit` to
+        100). When more deposits exist, the `Link` header contains the URL of the next page
+        (RFC 8288, `rel="next"`) as a path-absolute reference such as
+        `</time-deposits?afterId=100&limit=100>`; follow it until the header is absent.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size (1–1000). Defaults to 100 when only `afterId` is given.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 1000
+        - name: afterId
+          in: query
+          required: false
+          description: Return deposits with an id greater than this one (the last id of the previous page).
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: Time deposits ordered by id; withdrawals ordered by id.
+          headers:
+            Link:
+              description: '`</time-deposits?afterId=<last id>&limit=<n>>; rel="next"` (path-absolute) — only when paginating and more deposits exist.'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TimeDeposit'
+        '400':
+          description: '`limit` outside 1–1000, or a parameter that is not an integer.'
+  /time-deposits/balance-updates:
+    post:
+      tags: [time-deposits]
+      operationId: updateBalances
+      summary: Apply the monthly interest to all due time deposits
+      description: |
+        Meant to be triggered daily by a scheduler. Interest is posted at most once per calendar
+        month per deposit: a deposit is due when interest was never applied or was last applied
+        at least one calendar month ago (and it is eligible for its plan). Safe to repeat: a second
+        call in the same cycle changes nothing; concurrent calls never post interest twice.
+      responses:
+        '204':
+          description: Due deposits updated (also when nothing was due).
+components:
+  schemas:
+    TimeDeposit:
+      type: object
+      required: [id, planType, balance, days, withdrawals]
+      properties:
+        id:
+          type: integer
+          format: int32
+        planType:
+          type: string
+          description: Plan type, e.g. basic, student, premium. Unknown plans earn no interest.
+          example: basic
+        balance:
+          type: number
+          example: 1201.00
+        days:
+          type: integer
+          format: int32
+          description: Age of the deposit in days.
+        withdrawals:
+          type: array
+          items:
+            $ref: '#/components/schemas/Withdrawal'
+    Withdrawal:
+      type: object
+      required: [id, amount, date]
+      properties:
+        id:
+          type: integer
+          format: int32
+        amount:
+          type: number
+          example: 100.00
+        date:
+          type: string
+          format: date
