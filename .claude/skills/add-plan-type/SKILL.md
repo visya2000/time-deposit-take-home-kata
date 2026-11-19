@@ -13,7 +13,10 @@ calculator's rounding to make a new plan fit.
 
 1. **Clarify the rule.** Restate it as precise boundaries (e.g. "interest when days > 90").
    Decide explicitly whether the 30-day grace period applies (README: it applies to *existing*
-   plans). If anything is ambiguous, ask before writing code.
+   plans). The back-fill of missed months (ADR 0007) assumes the ages at which a plan pays
+   interest form **one contiguous window**; after a pause such a plan would be back-filled only on
+   the deposit's existing monthly due dates, so raise it before implementing. If anything is
+   ambiguous, ask before writing code.
 2. **Tests first** (use the `test-writer` subagent): a strategy unit test in
    `java/src/test/java/org/ikigaidigital/domain/interest/` covering one below / at / one above
    every boundary, plus one calculator-level case proving the plan is registered.

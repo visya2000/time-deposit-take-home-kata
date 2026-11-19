@@ -4,11 +4,14 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 import org.hibernate.SessionFactory;
 import org.hibernate.stat.Statistics;
+import org.ikigaidigital.DepositRows;
+import org.ikigaidigital.DepositRows.StoredRow;
 import org.ikigaidigital.TestcontainersConfiguration;
 import org.ikigaidigital.TimeDeposit;
 import org.ikigaidigital.application.port.out.TimeDepositRepository;
 import org.ikigaidigital.domain.DueTimeDeposit;
 import org.ikigaidigital.domain.InterestPosting;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -57,13 +60,20 @@ class TimeDepositPersistenceAdapterUpdateIT {
     @Autowired
     private EntityManagerFactory entityManagerFactory;
 
+    private DepositRows rows;
+
+    @BeforeEach
+    void createRowAccess() {
+        rows = new DepositRows(jdbc);
+    }
+
     // --- lockNextDue: due filter (the SQL is the only place the rule is evaluated) -----------
 
     @ParameterizedTest(name = "last interest applied on {0}")
     @NullSource
     @ValueSource(strings = {"2026-10-18", "2026-10-19"}) // cutoff - 1 day, cutoff
     void lockNextDue_returnsDeposit_whenInterestNeverAppliedOrLastAppliedOnOrBeforeCutoff(LocalDate lastApplied) {
-        insertDeposit(1, "basic", 31, "1000.00", lastApplied);
+        rows.insertDeposit(1, "basic", 31, "1000.00", lastApplied);
 
         assertThat(ids(repository.lockNextDue(CUTOFF, 0, 10))).containsExactly(1);
     }
@@ -71,7 +81,7 @@ class TimeDepositPersistenceAdapterUpdateIT {
     @ParameterizedTest(name = "last interest applied on {0}")
     @ValueSource(strings = {"2026-10-20", "2026-11-19"}) // cutoff + 1 day, today
     void lockNextDue_skipsDeposit_whenLastInterestAppliedAfterCutoff(LocalDate lastApplied) {
-        insertDeposit(1, "basic", 31, "1000.00", lastApplied);
+        rows.insertDeposit(1, "basic", 31, "1000.00", lastApplied);
 
         assertThat(repository.lockNextDue(CUTOFF, 0, 10)).isEmpty();
     }
@@ -96,8 +106,8 @@ class TimeDepositPersistenceAdapterUpdateIT {
     // A LIMIT applied before the due filter would return an empty chunk here and end the run early.
     @Test
     void lockNextDue_limitCountsOnlyDueDeposits() {
-        insertDeposit(1, "basic", 31, "1000.00", TODAY);
-        insertDeposit(2, "basic", 31, "1000.00", TODAY);
+        rows.insertDeposit(1, "basic", 31, "1000.00", TODAY);
+        rows.insertDeposit(2, "basic", 31, "1000.00", TODAY);
         insertDeposits(3, 4, 5);
 
         assertThat(ids(repository.lockNextDue(CUTOFF, 0, 2))).containsExactly(3, 4);
@@ -114,7 +124,7 @@ class TimeDepositPersistenceAdapterUpdateIT {
 
     @Test
     void lockNextDue_mapsRowToTimeDeposit_withBalanceAsDouble() {
-        insertDeposit(7, "premium", 46, "1000.10", null);
+        rows.insertDeposit(7, "premium", 46, "1000.10");
 
         List<DueTimeDeposit> locked = repository.lockNextDue(CUTOFF, 0, 10);
 
@@ -129,7 +139,7 @@ class TimeDepositPersistenceAdapterUpdateIT {
     @NullSource
     @ValueSource(strings = {"2026-08-31"})
     void lockNextDue_returnsTheStoredMarker(LocalDate lastApplied) {
-        insertDeposit(7, "basic", 400, "1000.00", lastApplied);
+        rows.insertDeposit(7, "basic", 400, "1000.00", lastApplied);
 
         assertThat(repository.lockNextDue(CUTOFF, 0, 10)).singleElement()
                 .extracting(DueTimeDeposit::lastInterestAppliedOn)
@@ -140,9 +150,9 @@ class TimeDepositPersistenceAdapterUpdateIT {
 
     @Test
     void saveAppliedInterest_writesEachPostingsBalanceAndMarker_onlyForThePostedDeposits() {
-        insertDeposit(1, "basic", 31, "1000.10", null);
-        insertDeposit(2, "basic", 31, "500.00", null);
-        insertDeposit(3, "basic", 400, "2000.00", LocalDate.of(2026, 8, 5));
+        rows.insertDeposit(1, "basic", 31, "1000.10");
+        rows.insertDeposit(2, "basic", 31, "500.00");
+        rows.insertDeposit(3, "basic", 400, "2000.00", LocalDate.of(2026, 8, 5));
         repository.lockNextDue(CUTOFF, 0, 10);
 
         // Markers differ per deposit: each is the deposit's own last due date, not the run date.
@@ -151,7 +161,7 @@ class TimeDepositPersistenceAdapterUpdateIT {
                 new InterestPosting(3, new BigDecimal("2004.99"), LocalDate.of(2026, 11, 5))));
         flushAndClear();
 
-        assertThat(storedRows()).containsExactly(
+        assertThat(rows.storedRows()).containsExactly(
                 new StoredRow(1, new BigDecimal("1000.93"), TODAY),
                 new StoredRow(2, new BigDecimal("500.00"), null), // locked, no posting
                 new StoredRow(3, new BigDecimal("2004.99"), LocalDate.of(2026, 11, 5)));
@@ -199,18 +209,9 @@ class TimeDepositPersistenceAdapterUpdateIT {
 
     // --- helpers -----------------------------------------------------------------------------
 
-    private record StoredRow(int id, BigDecimal balance, LocalDate lastInterestAppliedOn) {
-    }
-
     private void flushAndClear() {
         entityManager.flush();
         entityManager.clear();
-    }
-
-    private List<StoredRow> storedRows() {
-        return jdbc.query("SELECT id, balance, last_interest_applied_on FROM time_deposits ORDER BY id",
-                (rs, rowNum) -> new StoredRow(rs.getInt("id"), rs.getBigDecimal("balance"),
-                        rs.getObject("last_interest_applied_on", LocalDate.class)));
     }
 
     private static List<Integer> ids(List<DueTimeDeposit> deposits) {
@@ -220,13 +221,7 @@ class TimeDepositPersistenceAdapterUpdateIT {
     /** Due deposits (interest never applied). */
     private void insertDeposits(int... ids) {
         for (int id : ids) {
-            insertDeposit(id, "basic", 31, "1000.00", null);
+            rows.insertDeposit(id, "basic", 31, "1000.00");
         }
-    }
-
-    private void insertDeposit(int id, String planType, int days, String balance, LocalDate lastApplied) {
-        jdbc.update("INSERT INTO time_deposits (id, plan_type, days, balance, last_interest_applied_on)"
-                        + " VALUES (?, ?, ?, ?, ?)",
-                id, planType, days, new BigDecimal(balance), lastApplied);
     }
 }

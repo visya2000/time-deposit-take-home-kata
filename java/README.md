@@ -80,7 +80,8 @@ CI runs `./mvnw verify` on every push to `main` and on pull requests.
 |---|---|
 | `TimeDepositCalculatorTest` | Characterization of the original `updateBalance`: every plan boundary, rounding edges where `double` differs from exact decimal maths, unknown plans |
 | Strategy / service unit tests | Each plan's rule; a custom plan added through the extension point (`TimeDepositCalculatorStrategiesTest`); the balance-update run with in-memory fakes (chunks, idempotency, calendar months, failures, time zones, back-filling missed months); `InterestSchedule`, `Cents` |
-| Persistence ITs | Schema, seed, single-statement GET, keyset pagination, due filter in SQL, markers per deposit; `BalanceBackfillIT`: catch-up end to end |
+| Persistence ITs | Schema, seed, single-statement GET, keyset pagination, due filter in SQL, markers per deposit |
+| `BalanceUpdateIT` | The balance update end to end over PostgreSQL: eligibility, back-fill of missed months, idempotent re-run |
 | `BalanceUpdateConcurrencyIT` | Parallel runs, non-blocking reads, `SKIP LOCKED`, no lost update |
 | `BalanceUpdateRollbackIT` | A database failure in the middle of a chunk rolls back the whole chunk in PostgreSQL (incl. an UPDATE already executed); earlier chunks stay committed; a re-run posts the rest once |
 | `TimeDepositApiIT` | Both endpoints over HTTP, `Link` header, validation, Swagger UI |

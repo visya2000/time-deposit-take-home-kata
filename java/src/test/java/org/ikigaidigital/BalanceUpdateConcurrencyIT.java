@@ -1,5 +1,6 @@
 package org.ikigaidigital;
 
+import org.ikigaidigital.DepositRows.StoredRow;
 import org.ikigaidigital.application.port.in.GetAllTimeDepositsUseCase;
 import org.ikigaidigital.application.port.in.UpdateAllBalancesUseCase;
 import org.ikigaidigital.application.port.out.TimeDepositRepository;
@@ -15,16 +16,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.convention.TestBean;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Clock;
-import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -35,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
+import static org.ikigaidigital.FixedClockConfiguration.TODAY;
 
 /**
  * Concurrency guarantees of the balance update over real PostgreSQL (PLAN.md §3 "Correctness under
@@ -44,13 +42,13 @@ import static org.assertj.core.api.Assertions.tuple;
  * (Future.get / CountDownLatch.await with a timeout) and the waits stay well inside the class
  * timeout. Saves write absolute balances, so the locking itself is proven by the SKIP LOCKED and
  * external-writer tests; the parallel-runs test proves that overlapping runs finish and post once.
+ * Business date fixed by {@link FixedClockConfiguration}; own context because of the chunk size.
  */
 @SpringBootTest(properties = "interest.update.chunk-size=50") // many chunks, so parallel runs interleave
-@Import(TestcontainersConfiguration.class)
+@Import({TestcontainersConfiguration.class, FixedClockConfiguration.class})
 @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class BalanceUpdateConcurrencyIT {
 
-    private static final LocalDate TODAY = LocalDate.of(2026, 11, 19);
     private static final BigDecimal OPENING_BALANCE = new BigDecimal("1200.00");
     private static final BigDecimal AFTER_ONE_POSTING = new BigDecimal("1201.00"); // basic: 1200 * 0.01 / 12
 
@@ -72,17 +70,13 @@ class BalanceUpdateConcurrencyIT {
     @Autowired
     private JdbcTemplate jdbc;
 
-    @TestBean
-    private Clock clock;
-
-    static Clock clock() {
-        return Clock.fixed(TODAY.atTime(12, 0).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
-    }
+    private DepositRows rows;
 
     private ExecutorService executor;
 
     @BeforeEach
-    void startExecutor() {
+    void createHelpers() {
+        rows = new DepositRows(jdbc);
         executor = Executors.newFixedThreadPool(2);
     }
 
@@ -90,7 +84,7 @@ class BalanceUpdateConcurrencyIT {
     void stopExecutorAndDeleteRows() throws InterruptedException {
         executor.shutdownNow();
         executor.awaitTermination(10, TimeUnit.SECONDS);
-        jdbc.update("DELETE FROM time_deposits");
+        rows.deleteAll();
     }
 
     @Test
@@ -156,7 +150,7 @@ class BalanceUpdateConcurrencyIT {
             // Bounded: without SKIP LOCKED the run would wait for the lock and time out here.
             executor.submit(updateAllBalances::updateAllBalances).get(10, TimeUnit.SECONDS);
 
-            assertThat(storedRows()).containsExactly(
+            assertThat(rows.storedRows()).containsExactly(
                     new StoredRow(1, AFTER_ONE_POSTING, TODAY),
                     new StoredRow(2, OPENING_BALANCE, null),
                     new StoredRow(3, AFTER_ONE_POSTING, TODAY));
@@ -164,7 +158,7 @@ class BalanceUpdateConcurrencyIT {
 
         updateAllBalances.updateAllBalances(); // same business date
 
-        assertThat(storedRows()).containsExactly(
+        assertThat(rows.storedRows()).containsExactly(
                 new StoredRow(1, AFTER_ONE_POSTING, TODAY),
                 new StoredRow(2, AFTER_ONE_POSTING, TODAY),
                 new StoredRow(3, AFTER_ONE_POSTING, TODAY));
@@ -192,7 +186,7 @@ class BalanceUpdateConcurrencyIT {
 
         assertThat(externalUpdate.get(5, TimeUnit.SECONDS)).as("rows updated externally").isEqualTo(1);
         // No lost update: the external UPDATE re-reads the committed row (1201.00) and applies on top.
-        assertThat(storedRows()).containsExactly(new StoredRow(1, new BigDecimal("1101.00"), TODAY));
+        assertThat(rows.storedRows()).containsExactly(new StoredRow(1, new BigDecimal("1101.00"), TODAY));
     }
 
     private record RunInterval(long startNanos, long endNanos) {
@@ -228,18 +222,9 @@ class BalanceUpdateConcurrencyIT {
         return jdbc.queryForObject("SELECT COUNT(*) FROM time_deposits WHERE " + condition, Integer.class, args);
     }
 
+    /** A basic deposit, never posted, first eligible today (age 31). */
     private void insertDeposit(int id, String balance) {
-        jdbc.update("INSERT INTO time_deposits (id, plan_type, days, balance) VALUES (?, 'basic', 31, ?)",
-                id, new BigDecimal(balance));
-    }
-
-    private record StoredRow(int id, BigDecimal balance, LocalDate lastInterestAppliedOn) {
-    }
-
-    private List<StoredRow> storedRows() {
-        return jdbc.query("SELECT id, balance, last_interest_applied_on FROM time_deposits ORDER BY id",
-                (rs, rowNum) -> new StoredRow(rs.getInt("id"), rs.getBigDecimal("balance"),
-                        rs.getObject("last_interest_applied_on", LocalDate.class)));
+        rows.insertDeposit(id, "basic", 31, balance);
     }
 
     /**

@@ -1,5 +1,6 @@
 package org.ikigaidigital;
 
+import org.ikigaidigital.DepositRows.StoredRow;
 import org.ikigaidigital.application.port.in.UpdateAllBalancesUseCase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,33 +10,29 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.convention.TestBean;
 
 import java.math.BigDecimal;
-import java.time.Clock;
-import java.time.LocalDate;
-import java.time.ZoneOffset;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.ikigaidigital.FixedClockConfiguration.TODAY;
 
 /**
  * A failure in the middle of a chunk, against PostgreSQL (PLAN.md §6 item 5, step 17). The
  * service-level failure test uses the in-memory fake and fails before any write; here an UPDATE has
  * already been executed in the database when the chunk fails, and the test proves PostgreSQL rolls
- * it back. Real adapters and database, only the clock is fixed: the failure comes from a
- * test-created trigger, which also counts every UPDATE that reaches the database in a sequence
- * (sequences are not rolled back), so the test observes that deposit 3's UPDATE was executed.
- * Not transactional: every chunk commits on its own, as in production. Chunk size 2 over six
- * deposits gives chunks {1, 2}, {3, 4}, {5, 6}.
+ * it back. Real adapters and database, only the clock is fixed ({@link FixedClockConfiguration}):
+ * the failure comes from a test-created trigger, which also counts every UPDATE that reaches the
+ * database in a sequence (sequences are not rolled back), so the test observes that deposit 3's
+ * UPDATE was executed. Not transactional: every chunk commits on its own, as in production. Chunk
+ * size 2 over six deposits gives chunks {1, 2}, {3, 4}, {5, 6}. Same configuration as
+ * BalanceUpdateIT, so the two share one context and container.
  */
 @SpringBootTest(properties = "interest.update.chunk-size=2")
-@Import(TestcontainersConfiguration.class)
+@Import({TestcontainersConfiguration.class, FixedClockConfiguration.class})
 @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class BalanceUpdateRollbackIT {
 
-    private static final LocalDate TODAY = LocalDate.of(2026, 11, 19);
     private static final int FAILING_DEPOSIT_ID = 4;
     private static final String FAILURE_MESSAGE = "simulated failure on deposit " + FAILING_DEPOSIT_ID;
 
@@ -45,19 +42,15 @@ class BalanceUpdateRollbackIT {
     @Autowired
     private JdbcTemplate jdbc;
 
-    @TestBean
-    private Clock clock;
-
-    static Clock clock() {
-        return Clock.fixed(TODAY.atTime(12, 0).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
-    }
+    private DepositRows rows;
 
     @BeforeEach
     void insertDepositsAndFailingTrigger() {
+        rows = new DepositRows(jdbc);
         // Basic, never posted, first eligible today (age 31): exactly one posting each,
         // 1200.00 * 1 % / 12 = 1.00 -> 1201.00, marker today.
         for (int id = 1; id <= 6; id++) {
-            insertDeposit(id, "basic", 31, "1200.00");
+            rows.insertDeposit(id, "basic", 31, "1200.00");
         }
         jdbc.execute("DROP SEQUENCE IF EXISTS deposit_update_attempts");
         jdbc.execute("CREATE SEQUENCE deposit_update_attempts");
@@ -74,7 +67,7 @@ class BalanceUpdateRollbackIT {
         dropFailingTrigger();
         jdbc.execute("DROP FUNCTION IF EXISTS fail_deposit_update()");
         jdbc.execute("DROP SEQUENCE IF EXISTS deposit_update_attempts");
-        jdbc.update("DELETE FROM time_deposits");
+        rows.deleteAll();
     }
 
     @Test
@@ -87,7 +80,7 @@ class BalanceUpdateRollbackIT {
         // 4 (failed). Without the executed UPDATE 3 this would be 3.
         assertThat(jdbc.queryForObject("SELECT last_value FROM deposit_update_attempts", Long.class))
                 .as("UPDATEs executed by PostgreSQL").isEqualTo(4);
-        assertThat(storedRows()).containsExactly(
+        assertThat(rows.storedRows()).containsExactly(
                 // Chunk {1, 2} committed before the failure.
                 new StoredRow(1, new BigDecimal("1201.00"), TODAY),
                 new StoredRow(2, new BigDecimal("1201.00"), TODAY),
@@ -113,7 +106,7 @@ class BalanceUpdateRollbackIT {
         updateAllBalances.updateAllBalances();
 
         // Deposits 1 and 2 would be 1202.00 if their committed posting were applied again.
-        assertThat(storedRows()).containsExactly(
+        assertThat(rows.storedRows()).containsExactly(
                 new StoredRow(1, new BigDecimal("1201.00"), TODAY),
                 new StoredRow(2, new BigDecimal("1201.00"), TODAY),
                 new StoredRow(3, new BigDecimal("1201.00"), TODAY),
@@ -124,19 +117,5 @@ class BalanceUpdateRollbackIT {
 
     private void dropFailingTrigger() {
         jdbc.execute("DROP TRIGGER IF EXISTS fail_deposit_update ON time_deposits");
-    }
-
-    private record StoredRow(int id, BigDecimal balance, LocalDate lastInterestAppliedOn) {
-    }
-
-    private List<StoredRow> storedRows() {
-        return jdbc.query("SELECT id, balance, last_interest_applied_on FROM time_deposits ORDER BY id",
-                (rs, rowNum) -> new StoredRow(rs.getInt("id"), rs.getBigDecimal("balance"),
-                        rs.getObject("last_interest_applied_on", LocalDate.class)));
-    }
-
-    private void insertDeposit(int id, String planType, int days, String balance) {
-        jdbc.update("INSERT INTO time_deposits (id, plan_type, days, balance) VALUES (?, ?, ?, ?)",
-                id, planType, days, new BigDecimal(balance));
     }
 }
