@@ -15,3 +15,6 @@ spring:
         jdbc:
           batch_size: 500  # balance updates are flushed as batched UPDATEs
         order_updates: true
+        query:
+          # Never paginate a fetch join in memory (loads every row); fail instead.
+          fail_on_pagination_over_collection_fetch: true

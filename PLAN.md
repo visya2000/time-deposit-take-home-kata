@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–8 implemented (see §8).
+Status: **in progress** — steps 1–9 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -331,7 +331,7 @@ decision (are missed months owed?) with the open points above.
   index), and stable while data changes between requests — ordered by immutable, increasing
   `id`, so no duplicates or skipped rows. Trade-off: no "jump to page N".
 
-**HQL (Hibernate 6 JPQL superset), one SQL statement per request:**
+**HQL (Hibernate 7 JPQL superset), one SQL statement per request:**
 
 ```java
 // paginated — called with limit + 1
@@ -340,7 +340,7 @@ decision (are missed months owed?) with the open points above.
     WHERE d.id IN (SELECT d2.id FROM TimeDepositEntity d2
                    WHERE d2.id > :afterId ORDER BY d2.id LIMIT :limit)
     ORDER BY d.id, w.id""")
-List<TimeDepositEntity> findPage(int afterId, int limit);
+List<TimeDepositEntity> findPageWithWithdrawals(int afterId, int limit);
 
 // unpaginated
 @Query("SELECT d FROM TimeDepositEntity d LEFT JOIN FETCH d.withdrawals w ORDER BY d.id, w.id")
@@ -365,7 +365,9 @@ List<TimeDepositEntity> findAllWithWithdrawals();
   the subquery `LIMIT` and that it runs as one statement. Fallbacks, in order: the same HQL via
   `EntityManager.createQuery` in a custom repository fragment (bypasses Spring Data's parser);
   native SQL (deposits limited in a derived table, `LEFT JOIN` withdrawals) with manual row
-  grouping.
+  grouping. **Result (step 9):** Spring Data JPA 4.1 / Hibernate 7.4 accept the HQL in `@Query`
+  as is; one SQL statement per call is verified by `TimeDepositPersistenceAdapterReadIT` —
+  no fallback needed.
 - Indexes: PK serves the subquery's `ORDER BY id LIMIT`; `withdrawals.time_deposit_id` serves
   the join.
 
@@ -642,7 +644,8 @@ benefit at this size.
    Drop the local JUnit BOM, AssertJ and Surefire/Failsafe/compiler versions the Boot parent
    manages (keep JaCoCo), so Boot's dependency and plugin management applies.
 6. Domain read models, ports, GET use case in `TimeDepositService` + tests. (The service is
-   registered as a bean in step 9, once a `TimeDepositRepository` implementation exists.)
+   registered as a bean in step 10, once `TimeDepositRepository` and `TransactionRunner`
+   implementations exist.)
 7. Balance-update use case (`TransactionRunner` port, chunked keyset loop) + tests.
 8. Flyway schema migration + `local`-profile seed + Testcontainers test setup.
 9. Persistence read adapter: HQL spike (fallbacks if needed), GET queries + tests.
