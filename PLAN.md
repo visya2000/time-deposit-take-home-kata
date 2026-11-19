@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **complete** — all steps 1–17 implemented (see §8).
+Status: **in progress** — steps 1–18 implemented; step 19 (test suite consolidation) planned (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -108,7 +108,8 @@ org.ikigaidigital
 ├── application
 │   ├── port/in     UpdateAllBalancesUseCase, GetAllTimeDepositsUseCase
 │   ├── port/out    TimeDepositRepository, TransactionRunner
-│   └── TimeDepositService            (implements both use cases)
+│   ├── TimeDepositService            (implements both use cases; orchestration)
+│   └── InterestBackfill              (owed postings per deposit — §3 "Backfilling", step 18)
 └── adapter
     ├── in/web            controller implementing the generated OpenAPI interface, DTO mapping,
     │                     Link header
@@ -122,8 +123,9 @@ org.ikigaidigital
   `@Configuration` class in the adapter/config layer.
 - Dependency direction: `adapter → application → domain`, never the reverse.
   Guarded by code review and the `architecture-reviewer` subagent (ArchUnit: §11).
-- Per-chunk transactions: the application service owns the flow and the business rule
-  ("mark only deposits whose balance changed") and calls a tiny `TransactionRunner` outbound
+- Per-chunk transactions: the application layer owns the flow and the business rules
+  (`TimeDepositService` orchestrates the chunks; `InterestBackfill` decides what to post, incl.
+  "mark only deposits whose balance changed") and calls a tiny `TransactionRunner` outbound
   port; the adapter implements it with Spring's `TransactionTemplate`. The application layer
   stays free of Spring (`@Transactional`) and is unit-testable with a fake.
 - One `TimeDepositService` implements both use cases (decision 23). Considered: splitting into a
@@ -305,7 +307,7 @@ first deployment, every owed month is posted and each deposit keeps its own cycl
   generically by asking the calculator, no plan rule duplicated). Then `next(…)` as above. No
   eligible day yet (grace period, unknown plan) → no posting, marker stays `NULL`.
 
-**Posting each due date** (application service, frozen calculator unchanged):
+**Posting each due date** (`InterestBackfill` in the application layer, frozen calculator unchanged):
 
 ```
 balance = deposit.balance
@@ -779,6 +781,15 @@ benefit at this size.
     trigger fails the UPDATE of one deposit at the chunk's flush; the already-executed UPDATE of
     the previous deposit in the same chunk is rolled back, earlier chunks stay committed, and a
     re-run completes without double posting. Test only, no production change expected.
+18. **Refactor after the full review**: the per-deposit back-fill calculation moves from
+    `TimeDepositService` into the package-private `InterestBackfill` (application), so the service
+    is orchestration only (GET paging, chunked transactional loop); redundant
+    `spring-boot-starter` dependency removed. No behaviour change: all tests unchanged and green.
+19. **Test suite consolidation**: shared IT helpers (stored rows, inserts) and one shared
+    fixed-clock test configuration, so the end-to-end balance-update ITs share one Spring context
+    and PostgreSQL container; `BalanceBackfillIT` merged into `BalanceUpdateIT`;
+    `TimeDepositApplicationIT` replaced by a unit test of the clock bean factory; the
+    `/add-plan-type` skill mentions the contiguous-eligibility assumption (ADR 0007).
 
 ---
 

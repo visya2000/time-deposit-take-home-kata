@@ -94,7 +94,8 @@ breaking change ([ADR 0006](../docs/adr/0006-shared-kernel-in-root-package.md)).
 ```
 org.ikigaidigital                  TimeDeposit (frozen), TimeDepositCalculator (signature/behaviour kept)
 ├── domain                         read models; interest/ strategies — plain Java
-├── application                    use cases (port/in), repository + transaction ports (port/out), TimeDepositService
+├── application                    use cases (port/in), repository + transaction ports (port/out),
+│                                  TimeDepositService (orchestration), InterestBackfill (owed months)
 └── adapter
     ├── in/web                     controller implementing the interface generated from the contract
     ├── out/persistence            JPA entities, Spring Data repository, adapter, TransactionRunner
