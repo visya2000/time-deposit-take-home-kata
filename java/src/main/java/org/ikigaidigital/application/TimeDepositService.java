@@ -54,7 +54,9 @@ public class TimeDepositService implements GetAllTimeDepositsUseCase, UpdateAllB
      * posting). Assumption: called daily; interest is posted at most once per calendar month per
      * deposit — due again one calendar month (not 30 days) after it was last applied, because each
      * posting is a monthly rate (rate / 12). {@code today} is fixed once per run, in the clock's
-     * business zone, so a run spanning midnight uses one date.
+     * business zone, so a run spanning midnight uses one date. Assumption: {@code days} (the
+     * deposit's age) is maintained by another system and current when the run starts; this run
+     * changes only the balance (and its scheduling marker), never {@code days}.
      */
     @Override
     public void updateAllBalances() {

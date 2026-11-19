@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–12 implemented (see §8).
+Status: **in progress** — steps 1–13 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -110,7 +110,7 @@ org.ikigaidigital
     ├── out/persistence   TimeDepositEntity, WithdrawalEntity, Spring Data repository
     │                     (HQL for reads, native SQL for the locking update), mappers,
     │                     repository adapter, TransactionTemplate-based TransactionRunner
-    └── config            beans: Clock, TimeDepositCalculator
+    └── config            beans: Clock, TimeDepositCalculator, TimeDepositService
 ```
 
 - Domain is plain Java: no Spring/JPA annotations. The calculator is exposed as a bean via a
@@ -605,7 +605,7 @@ CLAUDE.md                          project memory: constraints, architecture, co
     └── add-plan-type/SKILL.md     playbook for adding a new interest plan (the extension point)
 docs/
 ├── AI_USAGE.md                    tools, setup, config, which parts were AI-assisted and why
-└── adr/                           short decision records (added as decisions are implemented)
+└── adr/                           short decision records (written in step 13 from §9)
 .github/workflows/ci.yml           ./mvnw verify on push/PR (added with the Maven Wrapper)
 ```
 
@@ -618,7 +618,7 @@ docs/
 | `PreToolUse` hook | Rejects Edit/Write on `TimeDeposit.java` (exit 2 + reason fed back to Claude). |
 | `PostToolUse` hook | Compiles after each `.java` edit so errors surface immediately. |
 | `Stop` hook | Runs `./mvnw test` when `java/` has uncommitted changes; red tests block the turn from ending. Guarded by `stop_hook_active` against loops. Testcontainers tests are left to `verify`/CI to keep it fast. |
-| Subagents | Fresh context, restricted role, return one report. `test-writer` (tests first), `architecture-reviewer` (diff review). Built-in `/code-review` covers correctness. |
+| Subagents | Fresh context, restricted role, return one report. `test-writer` (tests first), `architecture-reviewer` (diff review, every step). Built-in `/code-review` (correctness) in the final pass. |
 | `add-plan-type` skill | Repeatable procedure: boundary tests → strategy class → registration in `InterestStrategies.defaults()` → tests → review. |
 | CI | Same `./mvnw verify` on GitHub Actions (Docker available for Testcontainers). |
 
@@ -626,12 +626,16 @@ Hooks no-op until `java/mvnw` exists, so the harness can be installed before the
 
 ### Working loop per plan step
 
-1. Plan mode — agree on the step.
-2. `test-writer` adds tests; human checks they fail/pass for the right reason.
+1. Claude proposes the step in chat; the developer agrees or changes it.
+2. Skeletons where production code is involved; `test-writer` adds tests that fail for the right
+   reason.
 3. Implement — hooks give compile feedback and block contract edits.
-4. Stop hook enforces green unit tests.
-5. `architecture-reviewer` + `/code-review` on the diff; fix findings.
-6. Human reads every line and commits.
+4. Stop hook enforces green unit tests; `./mvnw verify` before hand-over.
+5. `architecture-reviewer` on the diff; fix findings or accept them with a reason.
+6. Human reads every line; Claude commits on explicit approval.
+
+The built-in `/code-review` (correctness) runs once over the whole change in the final pass
+(step 14) rather than per step.
 
 Maintenance: new rules → `CLAUDE.md` or a hook; design decisions → ADR; recurring tasks → skill.
 

@@ -10,7 +10,8 @@ How AI was used to build this solution, and how to reproduce the setup.
 
 ## Setup (reproducible)
 
-1. Install Claude Code and Git (Git Bash runs the hooks on Windows).
+1. Install Claude Code, Git (Git Bash runs the hooks on Windows), JDK 17+ (the hooks compile and
+   run the unit tests) and Docker (integration tests, local database).
 2. Clone the repository and start `claude` **from the repository root**.
 3. Everything below is committed and loads automatically. Verify with `/memory`, `/permissions`,
    `/hooks`, `/agents`.
@@ -19,27 +20,54 @@ How AI was used to build this solution, and how to reproduce the setup.
 
 | File | Purpose |
 |---|---|
-| `CLAUDE.md` | Project memory loaded every session: frozen contract, architecture map, commands, workflow rules. |
-| `PLAN.md` | Agreed plan and decisions; the agent works one step at a time from it. |
-| `.claude/settings.json` | Permissions (safe commands allowed, `git commit` asks, `git push` denied) and hooks. |
-| `.claude/hooks/protect-contract.sh` | `PreToolUse`: blocks any Edit/Write to `TimeDeposit.java`. |
-| `.claude/hooks/compile.sh` | `PostToolUse`: compiles after each `.java` edit; errors are fed back to the agent. |
-| `.claude/hooks/run-unit-tests.sh` | `Stop`: the agent cannot finish a turn with failing unit tests. |
-| `.claude/agents/test-writer.md` | Subagent: behaviour/boundary tests only, never production code. |
-| `.claude/agents/architecture-reviewer.md` | Subagent: read-only diff review (hexagonal rules, SOLID, dead code, over-engineering). |
-| `.claude/skills/add-plan-type/SKILL.md` | `/add-plan-type`: test-first playbook for adding an interest plan. |
+| [`CLAUDE.md`](../CLAUDE.md) | Project memory loaded every session: frozen contract, architecture map, commands, workflow rules. |
+| [`PLAN.md`](../PLAN.md) | Agreed plan and decisions; the agent works one step at a time from it. |
+| [`.claude/settings.json`](../.claude/settings.json) | Permissions (safe commands allowed, `git commit` asks, `git push` denied) and hooks. |
+| [`.claude/hooks/protect-contract.sh`](../.claude/hooks/protect-contract.sh) | `PreToolUse`: blocks any Edit/Write to `TimeDeposit.java`. |
+| [`.claude/hooks/compile.sh`](../.claude/hooks/compile.sh) | `PostToolUse`: compiles after each `.java` edit; errors are fed back to the agent. |
+| [`.claude/hooks/run-unit-tests.sh`](../.claude/hooks/run-unit-tests.sh) | `Stop`: the agent cannot finish a turn with failing unit tests. |
+| [`.claude/agents/test-writer.md`](../.claude/agents/test-writer.md) | Subagent: behaviour/boundary tests only, never production code. |
+| [`.claude/agents/architecture-reviewer.md`](../.claude/agents/architecture-reviewer.md) | Subagent: read-only diff review (hexagonal rules, SOLID, dead code, over-engineering). |
+| [`.claude/skills/add-plan-type/SKILL.md`](../.claude/skills/add-plan-type/SKILL.md) | `/add-plan-type`: test-first playbook for adding an interest plan. |
+| [`.gitattributes`](../.gitattributes) | LF for `*.sh` and `mvnw` (the hooks break with CRLF on Windows checkouts), CRLF for `*.cmd`. |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | CI: the same `./mvnw verify` on every push to `main` and on pull requests. |
 
 Design principle: prompts and `CLAUDE.md` are guidance; hooks, tests and CI are the
 enforcement. Personal overrides go in `.claude/settings.local.json` (gitignored).
 
-## Workflow per step
+## Workflow per step (as actually used)
 
-Plan mode → `test-writer` adds tests → implement (hooks give feedback) → Stop hook enforces green
-unit tests → `architecture-reviewer` + `/code-review` → human reviews every line → human commits.
+One `PLAN.md` step at a time, one commit each:
+
+1. Claude proposes the step's approach; the developer approves or changes it.
+2. Where production code is involved, Claude writes compiling skeletons first; the `test-writer`
+   subagent writes tests that **fail for the right reason** (behaviour, boundaries, fakes instead
+   of mocks).
+3. Claude implements; the `PostToolUse` hook compiles after every edit, the `Stop` hook refuses to
+   end a turn with red unit tests; `./mvnw verify` (Testcontainers) runs before hand-over.
+4. The `architecture-reviewer` subagent reviews the diff; findings are fixed or explicitly
+   accepted with a reason.
+5. The developer reviews every line; Claude commits only on explicit approval.
+
+## Where the harness made a difference
+
+- **Tests first exposed wrong assumptions in the plan**: generated bean validation answered with
+  `500` instead of `400`, and springdoc could not show Swagger UI without generating a second spec
+  (step 12); both were fixed before the controller logic was implemented.
+- **Independent review caught real issues** the implementer missed, e.g. untested rounding edges
+  for student/premium (a reordered expression would have passed all tests), a double-encoded and
+  proxy-unsafe `Link` URL, a concurrency test that proved less than its name claimed, and
+  profile/seed setups that would break Flyway validation.
+- **Hooks gave immediate feedback**: the compile hook reported every broken intermediate state;
+  the Stop hook blocked ending a turn while test sources did not compile (step 7).
+- **Human decisions** were asked for where they belong: the `null` plan-type behaviour change,
+  keeping one application service, and the Swagger UI approach.
 
 ## What was AI-assisted and why
 
-_To be completed as the implementation progresses (PLAN.md step 13)._
+Claude wrote most of the code, tests and documentation — boilerplate, test matrices and reviews are
+where an agent is fastest and most thorough. The developer owned the requirements interpretation,
+every decision listed in `PLAN.md` §9, and the review of every line before each commit.
 
 | Area | AI involvement | Human decision / review |
 |---|---|---|
@@ -56,3 +84,4 @@ _To be completed as the implementation progresses (PLAN.md step 13)._
 | Persistence update adapter (step 10) | Locking native query, MANDATORY-transaction adapter methods, TransactionTemplate runner and wiring by Claude; adapter/runner/end-to-end ITs (due filter pinned at SQL level) by the `test-writer` subagent | Reviewed before commit |
 | Concurrency tests (step 11) | Written by the `test-writer` subagent (parallel runs over 3000 deposits, non-blocking GET, SKIP LOCKED, no lost update); repeated 4x for flakiness; no production change needed | Reviewed before commit |
 | OpenAPI contract, web adapter, Swagger UI (step 12) | Contract, generator config and controller by Claude; end-to-end HTTP ITs by the `test-writer` subagent, which exposed two wrong plan assumptions (validation ended in 500; springdoc UI requires the generated spec) — fixed via `useSpringBuiltInValidation` and a static Swagger UI page; `architecture-reviewer` found double encoding and proxy issues in the absolute `Link` URL — now path-absolute; manual run with the `local` seed verified | Swagger UI approach decided by the developer; reviewed before commit |
+| Documentation (step 13) | Solution README with Swagger instructions, ADRs 0001–0005 and this file drafted by Claude from PLAN.md and the commit history | Reviewed before commit |
