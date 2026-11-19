@@ -48,7 +48,7 @@ class BalanceUpdateIT {
     @BeforeEach
     void insertDeposits() {
         insertDeposit(1, "basic", 31, "1000.10");    // 0.8334... -> 0.83
-        insertDeposit(2, "student", 365, "1200.00"); // last day with interest
+        insertDeposit(2, "student", 365, "1200.00"); // never posted, eligible since day 31: back-filled
         insertDeposit(3, "basic", 30, "1200.00");    // grace period
         insertDeposit(4, "premium", 46, "1200.00");  // first day with interest
         insertDeposit(5, "gold", 400, "1200.00");    // unknown plan
@@ -59,13 +59,18 @@ class BalanceUpdateIT {
         jdbc.update("DELETE FROM time_deposits");
     }
 
+    // Deposits 1 and 4 become eligible today: one posting, marker today. Deposit 2 (step 16) was
+    // opened 2025-11-19 and first eligible at age 31 on 2025-12-20: 11 monthly postings up to
+    // 2026-10-20 (age 335; 2026-11-20 is after today), student 3 % / 12 compounded in cents:
+    // 1200.00 -> 1203.00 -> 1206.01 -> 1209.03 -> 1212.05 -> 1215.08 -> 1218.12 -> 1221.17
+    // -> 1224.22 -> 1227.28 -> 1230.35 -> 1233.43; marker = the last due date, 2026-10-20.
     @Test
-    void appliesInterestToEligibleDeposits_andMarksOnlyThem_withTodaysBusinessDate() {
+    void appliesInterestToEligibleDeposits_andMarksOnlyThem_withTheirLastDueDate() {
         updateAllBalances.updateAllBalances();
 
         assertThat(storedRows()).containsExactly(
                 new StoredRow(1, new BigDecimal("1000.93"), TODAY),
-                new StoredRow(2, new BigDecimal("1203.00"), TODAY),
+                new StoredRow(2, new BigDecimal("1233.43"), LocalDate.of(2026, 10, 20)),
                 new StoredRow(3, new BigDecimal("1200.00"), null),
                 new StoredRow(4, new BigDecimal("1205.00"), TODAY),
                 new StoredRow(5, new BigDecimal("1200.00"), null));

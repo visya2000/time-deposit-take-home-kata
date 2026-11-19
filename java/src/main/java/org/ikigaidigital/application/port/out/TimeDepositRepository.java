@@ -1,6 +1,7 @@
 package org.ikigaidigital.application.port.out;
 
-import org.ikigaidigital.TimeDeposit;
+import org.ikigaidigital.domain.DueTimeDeposit;
+import org.ikigaidigital.domain.InterestPosting;
 import org.ikigaidigital.domain.TimeDepositWithWithdrawals;
 
 import java.time.LocalDate;
@@ -18,15 +19,15 @@ public interface TimeDepositRepository {
     List<TimeDepositWithWithdrawals> findPageWithWithdrawals(int afterId, int limit);
 
     /**
-     * Locks and returns at most {@code limit} due deposits with {@code id > afterId}, ordered by id.
-     * Due: interest never applied, or last applied on or before {@code cutoff}. Rows locked by
-     * another transaction are skipped. Must run inside a transaction ({@link TransactionRunner}).
+     * Locks and returns at most {@code limit} due deposits with {@code id > afterId}, ordered by id,
+     * each with the scheduled due date of its last interest posting. Due: interest never applied,
+     * or last applied on or before {@code cutoff}. Rows locked by another transaction are skipped.
+     * Must run inside a transaction ({@link TransactionRunner}).
      */
-    List<TimeDeposit> lockNextDue(LocalDate cutoff, int afterId, int limit);
+    List<DueTimeDeposit> lockNextDue(LocalDate cutoff, int afterId, int limit);
 
     /**
-     * Persists the balance of the given deposits (locked in the same transaction) and records
-     * {@code appliedOn} as the date interest was last applied to them.
+     * Persists each posting's balance and marker for its deposit (locked in the same transaction).
      */
-    void saveAppliedInterest(List<TimeDeposit> deposits, LocalDate appliedOn);
+    void saveAppliedInterest(List<InterestPosting> postings);
 }

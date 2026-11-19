@@ -2,11 +2,12 @@ package org.ikigaidigital.application;
 
 import org.ikigaidigital.TimeDeposit;
 import org.ikigaidigital.application.port.out.TimeDepositRepository;
+import org.ikigaidigital.domain.DueTimeDeposit;
+import org.ikigaidigital.domain.InterestPosting;
 import org.ikigaidigital.domain.TimeDepositWithWithdrawals;
 import org.ikigaidigital.domain.Withdrawal;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.HashSet;
 import java.util.List;
@@ -15,8 +16,9 @@ import java.util.TreeMap;
 
 /**
  * In-memory fake of the outbound repository port that behaves like the database: rows are kept
- * ordered by id, {@link #lockNextDue} returns fresh copies, and only {@link #saveAppliedInterest}
- * writes back (balance rounded to cents like the persistence adapter). Transactions are simulated
+ * ordered by id, {@link #lockNextDue} returns fresh copies with their marker, and only
+ * {@link #saveAppliedInterest} writes back: each posting's balance exactly as given (the service
+ * delivers cents; the adapter does not round) and its marker. Transactions are simulated
  * by {@link InMemoryTransactionRunner} with a snapshot; the update methods fail outside of one.
  */
 class InMemoryTimeDepositRepository implements TimeDepositRepository {
@@ -94,27 +96,29 @@ class InMemoryTimeDepositRepository implements TimeDepositRepository {
     }
 
     @Override
-    public List<TimeDeposit> lockNextDue(LocalDate cutoff, int afterId, int limit) {
+    public List<DueTimeDeposit> lockNextDue(LocalDate cutoff, int afterId, int limit) {
         requireTransaction();
-        List<TimeDeposit> due = rows.tailMap(afterId, false).values().stream()
+        List<DueTimeDeposit> due = rows.tailMap(afterId, false).values().stream()
                 .filter(row -> row.lastInterestAppliedOn() == null || !row.lastInterestAppliedOn().isAfter(cutoff))
                 .limit(limit)
-                .map(row -> new TimeDeposit(row.id(), row.planType(), row.balance().doubleValue(), row.days()))
+                .map(row -> new DueTimeDeposit(
+                        new TimeDeposit(row.id(), row.planType(), row.balance().doubleValue(), row.days()),
+                        row.lastInterestAppliedOn()))
                 .toList();
-        due.forEach(deposit -> lockedIds.add(deposit.getId()));
+        due.forEach(locked -> lockedIds.add(locked.deposit().getId()));
         return due;
     }
 
     @Override
-    public void saveAppliedInterest(List<TimeDeposit> deposits, LocalDate appliedOn) {
+    public void saveAppliedInterest(List<InterestPosting> postings) {
         requireTransaction();
-        for (TimeDeposit deposit : deposits) {
-            if (!lockedIds.contains(deposit.getId())) {
-                throw new IllegalStateException("deposit " + deposit.getId() + " not locked in this transaction");
+        for (InterestPosting posting : postings) {
+            if (!lockedIds.contains(posting.depositId())) {
+                throw new IllegalStateException("deposit " + posting.depositId() + " not locked in this transaction");
             }
-            Row row = rows.get(deposit.getId());
-            BigDecimal balance = BigDecimal.valueOf(deposit.getBalance()).setScale(2, RoundingMode.HALF_UP);
-            rows.put(row.id(), new Row(row.id(), row.planType(), balance, row.days(), appliedOn, row.withdrawals()));
+            Row row = rows.get(posting.depositId());
+            rows.put(row.id(), new Row(row.id(), row.planType(), posting.balance(), row.days(),
+                    posting.lastInterestAppliedOn(), row.withdrawals()));
         }
     }
 

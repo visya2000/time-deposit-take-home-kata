@@ -42,7 +42,7 @@ org.ikigaidigital.adapter.out.persistence  JPA entities, Spring Data repos, mapp
 
 - Dependencies point inward: adapter → application → domain. Domain imports no Spring/JPA.
 - Convert `Double` ↔ `BigDecimal` only at the adapter boundaries — and in the domain `Cents`
-  helper (planned, step 16), the single cents-rounding rule (PLAN.md decision 24).
+  helper, the single cents-rounding rule (PLAN.md decision 24).
 - `TimeDeposit` and `TimeDepositCalculator` stay in `org.ikigaidigital` as a shared kernel
   (moving them is a breaking change; ADR 0006).
 - New interest plan = new `InterestStrategy` class + registration (use `/add-plan-type`).

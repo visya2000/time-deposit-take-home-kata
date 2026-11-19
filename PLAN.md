@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–14 implemented; steps 15 (shared kernel), 16 (back-fill enhancement) and 17 (DB rollback test) planned (see §8).
+Status: **in progress** — steps 1–16 implemented; step 17 (DB rollback test) planned (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -82,7 +82,7 @@ architecture & dependency review → dead code removal → final code review →
 5. DB names are snake_case; API names are camelCase as in the README (§4).
 6. One extra column, `time_deposits.last_interest_applied_on`, is added beyond the README schema
    (§3); it is not exposed by the API.
-7. Missed months are back-filled (planned, step 16): a run posts every month owed since the last posting (or since
+7. Missed months are back-filled (step 16): a run posts every month owed since the last posting (or since
    the deposit first became eligible), judging eligibility by the deposit's age on each due date
    (§3 "Backfilling", step 16).
 8. Business dates are computed in a configured zone, default `UTC` (§3).
@@ -165,9 +165,9 @@ double); exact maths 18.02. So BigDecimal inside `updateBalance` is a behaviour 
 refactoring — and `TimeDeposit.balance` is `Double` in a frozen class.
 
 - DB: `NUMERIC(19,2)`; API: `BigDecimal`; `Withdrawal.amount`: `BigDecimal` (new class).
-- `double` lives only transiently inside one calculation. The persistence adapter converts with
-  `BigDecimal.valueOf(d).setScale(2, HALF_UP)` (since step 16 the shared domain helper `Cents`,
-  also used between back-filled postings), so every write re-quantises to cents and float
+- `double` lives only transiently inside one calculation. Every new balance is converted with
+  `BigDecimal.valueOf(d).setScale(2, HALF_UP)` (since step 16 in the domain helper `Cents`, used
+  by the balance update; the adapter stores the result as is), so every write is in cents and float
   error never accumulates across runs (e.g. `1000.10 + 0.83 = 1000.9300000000001` in double →
   stored `1000.93`); the DB is the source of truth.
 - Precision limit (documented): `double` represents cents exactly only up to about 9×10¹³,
@@ -198,8 +198,8 @@ late run back-fills every owed month and the marker keeps the deposit's own cycl
   of annual interest. Simulated over every start date 2024–2027 with daily runs: at most
   12 postings in any 1-year window, gaps 28–31 days. Month-end anchors drift to the next valid
   day (Jan 31 → due Mar 1 → then the 1st), never two postings within a month.
-- **Marker advances only when the balance changed** (interest ≠ 0), to the last due date
-  evaluated. Deposits still in a grace period (≤ 30 days, premium ≤ 45) are re-checked every run
+- **Marker advances only when the balance changed** (interest ≠ 0), to the last due date that
+  earned interest. Deposits still in a grace period (≤ 30 days, premium ≤ 45) are re-checked every run
   and get their first interest as soon as they become eligible, then monthly from that date.
   Never-again-eligible deposits (student > 365 days, unknown plan, interest rounding to 0.00)
   are re-evaluated every run without effect — harmless, idempotent.
@@ -284,8 +284,9 @@ PostgreSQL MVCC: plain `SELECT`s take no row locks and are never blocked by `FOR
 ### Backfilling missed months (step 16)
 
 Goal: a run produces **exactly what daily runs would have produced** since the deposit's last
-posting — or since it was opened, if it was never posted. With daily runs nothing changes (all
-existing balance-update tests stay valid); after an outage, a skipped (locked) row, or on the
+posting — or since it was opened, if it was never posted. With daily runs nothing changes (existing
+balance-update tests stay valid, except never-posted deposits older than one cycle past their
+first eligible day — step 16); after an outage, a skipped (locked) row, or on the
 first deployment, every owed month is posted and each deposit keeps its own cycle.
 
 **Due dates of a deposit** (domain `InterestSchedule`, pure date logic):
@@ -311,8 +312,9 @@ balance = deposit.balance
 for each due date d:
     copy = new TimeDeposit(id, planType, balance, days − DAYS.between(d, today))  // age on d
     calculator.updateBalance(List.of(copy))                                        // frozen
-    balance = Cents.round(copy.getBalance())        // as an on-time run stores it (see below)
-balance changed → posting(id, balance, marker = last due date)
+    newBalance = Cents.of(copy.getBalance()).doubleValue()   // as an on-time run stores it
+    if newBalance != balance: balance = newBalance; lastPosting = d
+lastPosting set → posting(id, Cents.of(balance), marker = lastPosting)
 ```
 
 - **Eligibility on each due date**, not today: a student deposit now 380 days old that missed a
@@ -323,18 +325,21 @@ balance changed → posting(id, balance, marker = last due date)
   the balance in cents. Without it, back-filled premium balances differ by a cent in 6,091 of
   10M cases after two postings (e.g. 3.59 → 3.61 instead of 3.62). The rounding rule
   (`BigDecimal.valueOf(d).setScale(2, HALF_UP)`) moves from the persistence adapter into one
-  domain helper (`Cents`) used by both — one rule.
+  domain helper (`Cents`); the posting carries the result as `BigDecimal`, so the adapter stores
+  it without converting or rounding — one rule, one place.
 - **No cap** on the number of months per run: the interest is owed either way; a cap would
   silently drop money (a corrupt marker would show up as a large posting instead).
-- **Marker** = the last due date evaluated (≤ `today`, and `next(marker) > today`), so the
-  deposit is not due again until its next cycle. Marker advanced only if the balance changed
-  (unchanged rule). Idempotency, locking and per-chunk transactions are unchanged: all postings
+- **Marker** = the last due date that **earned interest** (≤ `today`), exactly as daily runs mark
+  only postings that changed the balance; later due dates that earned nothing (e.g. a student
+  deposit after day 365) leave it there, as daily runs would. No posting at all → marker
+  unchanged. Idempotency, locking and per-chunk transactions are unchanged: all postings
   of a deposit happen in its chunk's transaction.
 
 **Ports**: `lockNextDue` returns `DueTimeDeposit(TimeDeposit deposit, LocalDate
 lastInterestAppliedOn)` (domain record; the frozen class has no marker);
-`saveAppliedInterest(List<InterestPosting>)` with `InterestPosting(int depositId, double balance,
-LocalDate lastInterestAppliedOn)` — the marker now differs per deposit.
+`saveAppliedInterest(List<InterestPosting>)` with `InterestPosting(int depositId, BigDecimal
+balance, LocalDate lastInterestAppliedOn)` — balance already in cents; the marker now differs per
+deposit.
 
 **First deployment / initial run**: every marker is `NULL`, so the first run back-fills every
 month since each deposit became eligible. **Assumption: today's balances contain no interest
@@ -346,6 +351,12 @@ migration before the first run, otherwise interest would be paid twice.
 - **Balance history**: withdrawals between missed due dates are not known per date; the
   current balance is used (consistent with assumption 3: withdrawals do not affect interest).
 - **`days` must be current** (assumption 1): the age on past dates is derived from it.
+- **Plan type constant**: months that earned nothing are re-evaluated on later runs with the
+  current plan type and balance — a change by another system would earn them retroactively.
+- **One contiguous eligibility window per plan** (true for basic, student, premium): a plan that
+  pays again after a pause would be back-filled only on its monthly due dates.
+- The V1 migration comment on `last_interest_applied_on` predates this design (the applied
+  migration is not edited — Flyway checksum); the meaning is documented here and in ADR 0007.
 
 Cost: a deposit with a marker evaluates one calculator call per owed month (one on daily runs).
 A never-posted deposit additionally scans its days from opening to the first eligible day (≤ 46
@@ -604,8 +615,8 @@ not a "replace this resource" operation, so `PUT` would be misleading.
    - the business date comes from the clock's zone: `Clock.fixed(2026-11-30T23:30Z, Asia/Tokyo)`
      → marker `2026-12-01` (catches `LocalDate.now()` without the clock);
    - GET use case: `hasNext` / items passed through for paginated and unpaginated calls;
-   - **back-fill (step 16)** — all earlier balance-update tests stay valid unchanged (daily runs
-     give the same result); in addition:
+   - **back-fill (step 16)** — earlier balance-update tests stay valid (daily runs give the same
+     result), except never-posted deposits older than one cycle past eligibility; in addition:
      - `InterestSchedule.next`: same day next month; month-end → 1st of the following month
        (Jan 31 → Mar 1; Mar 31 → May 1); leap year (Jan 29 2028 → Feb 29); due dates up to and
        including today, none when the next is after today;
@@ -785,7 +796,7 @@ benefit at this size.
 | 10 | Business time zone | `Clock` bean in `interest.business-zone`, default `UTC`. |
 | 11 | Persistence technology | Spring Data JPA; native SQL for the locking update query; `open-in-view=false` (§5). |
 | 12 | Locking | `FOR UPDATE SKIP LOCKED` per chunk; concurrent writers (incl. withdrawal inserts) wait until the chunk commits — intended; rows locked by others are processed next run; reads never block (MVCC). |
-| 13 | Backfilling missed months | Planned for step 16 (§3): every owed month posted as daily runs would have done; next due date = same day next month or the 1st of the following month; eligibility by the age on each due date; never-posted deposits back-filled from their first eligible day; marker = last due date; no cap. Assumes existing balances contain no interest yet. |
+| 13 | Backfilling missed months | Implemented in step 16 (§3): every owed month posted as daily runs would have done; next due date = same day next month or the 1st of the following month; eligibility by the age on each due date; never-posted deposits back-filled from their first eligible day; marker = last due date that earned interest; no cap. Assumes existing balances contain no interest yet. |
 | 14 | Parallel batch updates | Not implemented; single-threaded chunked run. Documented as a possible enhancement (§11). |
 | 15 | GET query | HQL fetch join ordered by deposit and withdrawal id; paginated variant limits deposit ids in a subquery (`IN (SELECT … LIMIT)`) → one SQL statement → one snapshot, no read skew; enforced by a test. Spike first; fallbacks: `EntityManager` HQL, then native SQL. |
 | 16 | PgBouncer | Not needed (instances × pool ≪ `max_connections`); possible enhancement (§11). |
@@ -796,7 +807,7 @@ benefit at this size.
 | 21 | API tooling | Static Swagger UI page (webjar) shows the contract file; no springdoc, no `/v3/api-docs`, no Actuator; `planType` is a free string in the contract. |
 | 22 | `null` plan type | Treated as unknown (no interest, no exception). Previously a `NullPointerException` when `days > 30`; accepted as invalid input (out of scope), documented in `TimeDepositCalculator`. |
 | 23 | Application service | One `TimeDepositService` implements both use cases; split considered and deferred (§2). |
-| 24 | Cents rounding | One domain helper (`Cents`, `BigDecimal.valueOf(d).setScale(2, HALF_UP)`) used by the persistence adapter on write and by the back-fill between postings. |
+| 24 | Cents rounding | One domain helper (`Cents`, `BigDecimal.valueOf(d).setScale(2, HALF_UP)`) used by the balance update between back-filled postings (`Cents.round`, a double for the frozen calculator) and for the stored balance (`Cents.of`); `InterestPosting` carries a `BigDecimal`, so the persistence adapter no longer converts or rounds. |
 | 25 | Shared kernel | `TimeDeposit` and `TimeDepositCalculator` stay in `org.ikigaidigital` (moving them = breaking change); documented as a shared kernel with a suggested coordinated move (`TimeDeposit` → `domain`, calculator → `domain.interest`; ADR 0006). Strategies keep the full `TimeDeposit` as input; Spring main class stays in the root package. |
 
 ---

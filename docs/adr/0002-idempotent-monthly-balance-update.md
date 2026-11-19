@@ -1,6 +1,6 @@
 # 0002 — Idempotent, concurrency-safe monthly balance update
 
-Status: accepted
+Status: accepted (extended by 0007)
 
 ## Context
 
@@ -30,7 +30,7 @@ interest is due per deposit, not per calendar run. The data set may be large.
 - Concurrent runs never process a row twice (`FOR UPDATE SKIP LOCKED`; PostgreSQL re-checks the
   due condition on the latest row version); rows locked by others are processed by the next run.
   Other writers on a locked row wait until the chunk commits (no lost update). Reads never block.
-- Missed runs are not back-filled (one posting after an outage, the cycle shifts) — a known
-  limitation; whether missed months are owed is a business decision.
+- Missed months are back-filled since ADR 0007: a late run posts every owed month and the marker
+  keeps the deposit's cycle (originally: one posting after an outage and a shifted cycle).
 - Considered and rejected: a per-month postings ledger (puts every deposit on one calendar cycle,
   grows by deposits × 12 rows per year) and an `Idempotency-Key` header (covers retries only).

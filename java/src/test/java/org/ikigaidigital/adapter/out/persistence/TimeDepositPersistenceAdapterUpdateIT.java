@@ -7,10 +7,11 @@ import org.hibernate.stat.Statistics;
 import org.ikigaidigital.TestcontainersConfiguration;
 import org.ikigaidigital.TimeDeposit;
 import org.ikigaidigital.application.port.out.TimeDepositRepository;
+import org.ikigaidigital.domain.DueTimeDeposit;
+import org.ikigaidigital.domain.InterestPosting;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,6 +35,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * commit, so tests flush and clear the persistence context before reading rows back with JdbcTemplate.
  * Skipping rows locked by another transaction is covered by the concurrency tests (step 11).
  * Statistics are enabled as in TimeDepositPersistenceAdapterReadIT, so the two share one context.
+ * Since step 16 postings arrive already in cents; the rounding rule is tested in CentsTest.
  */
 @SpringBootTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
 @Import(TestcontainersConfiguration.class)
@@ -114,66 +116,64 @@ class TimeDepositPersistenceAdapterUpdateIT {
     void lockNextDue_mapsRowToTimeDeposit_withBalanceAsDouble() {
         insertDeposit(7, "premium", 46, "1000.10", null);
 
-        List<TimeDeposit> locked = repository.lockNextDue(CUTOFF, 0, 10);
+        List<DueTimeDeposit> locked = repository.lockNextDue(CUTOFF, 0, 10);
 
         assertThat(locked).singleElement()
+                .extracting(DueTimeDeposit::deposit)
                 .extracting(TimeDeposit::getId, TimeDeposit::getPlanType, TimeDeposit::getDays, TimeDeposit::getBalance)
                 .containsExactly(7, "premium", 46, 1000.1);
+    }
+
+    // The back-fill derives the owed due dates from the marker, so it must come back as stored.
+    @ParameterizedTest(name = "last interest applied on {0}")
+    @NullSource
+    @ValueSource(strings = {"2026-08-31"})
+    void lockNextDue_returnsTheStoredMarker(LocalDate lastApplied) {
+        insertDeposit(7, "basic", 400, "1000.00", lastApplied);
+
+        assertThat(repository.lockNextDue(CUTOFF, 0, 10)).singleElement()
+                .extracting(DueTimeDeposit::lastInterestAppliedOn)
+                .isEqualTo(lastApplied);
     }
 
     // --- saveAppliedInterest -----------------------------------------------------------------
 
     @Test
-    void saveAppliedInterest_writesBalanceAndMarker_onlyForTheGivenDeposits() {
+    void saveAppliedInterest_writesEachPostingsBalanceAndMarker_onlyForThePostedDeposits() {
         insertDeposit(1, "basic", 31, "1000.10", null);
         insertDeposit(2, "basic", 31, "500.00", null);
-        insertDeposit(3, "basic", 400, "2000.00", CUTOFF);
-        List<TimeDeposit> locked = repository.lockNextDue(CUTOFF, 0, 10);
-        locked.forEach(deposit -> deposit.setBalance(deposit.getBalance() + 0.83));
+        insertDeposit(3, "basic", 400, "2000.00", LocalDate.of(2026, 8, 5));
+        repository.lockNextDue(CUTOFF, 0, 10);
 
-        repository.saveAppliedInterest(List.of(locked.get(0), locked.get(2)), TODAY);
+        // Markers differ per deposit: each is the deposit's own last due date, not the run date.
+        repository.saveAppliedInterest(List.of(
+                new InterestPosting(1, new BigDecimal("1000.93"), TODAY),
+                new InterestPosting(3, new BigDecimal("2004.99"), LocalDate.of(2026, 11, 5))));
         flushAndClear();
 
         assertThat(storedRows()).containsExactly(
                 new StoredRow(1, new BigDecimal("1000.93"), TODAY),
-                new StoredRow(2, new BigDecimal("500.00"), null), // locked, changed in memory, not passed
-                new StoredRow(3, new BigDecimal("2000.83"), TODAY));
+                new StoredRow(2, new BigDecimal("500.00"), null), // locked, no posting
+                new StoredRow(3, new BigDecimal("2004.99"), LocalDate.of(2026, 11, 5)));
     }
 
     // The lock returns managed entities: the save reads them from the persistence context (no
-    // SELECT) and dirty checking writes only the passed deposits, in one batched statement.
+    // SELECT) and dirty checking writes only the posted deposits, in one batched statement.
     @Test
-    void saveAppliedInterest_updatesOnlyThePassedLockedEntities_inOneBatchWithoutFurtherSelects() {
+    void saveAppliedInterest_updatesOnlyThePostedLockedEntities_inOneBatchWithoutFurtherSelects() {
         insertDeposits(1, 2, 3);
-        List<TimeDeposit> locked = repository.lockNextDue(CUTOFF, 0, 10);
-        locked.forEach(deposit -> deposit.setBalance(deposit.getBalance() + 1));
+        repository.lockNextDue(CUTOFF, 0, 10);
         Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
         statistics.clear();
 
-        repository.saveAppliedInterest(List.of(locked.get(0), locked.get(2)), TODAY);
+        repository.saveAppliedInterest(List.of(
+                new InterestPosting(1, new BigDecimal("1001.00"), TODAY),
+                new InterestPosting(3, new BigDecimal("1001.00"), TODAY)));
         entityManager.flush();
 
         assertThat(statistics.getEntityLoadCount()).as("entities loaded from the database").isZero();
         assertThat(statistics.getEntityUpdateCount()).as("entities updated").isEqualTo(2);
         assertThat(statistics.getPrepareStatementCount()).as("SQL statements").isEqualTo(1);
-    }
-
-    // 1000.10 + 0.83 is 1000.9300000000001 in double. 1.005 pins BigDecimal.valueOf (the decimal the
-    // double prints as): new BigDecimal(1.005) is 1.00499999... and would round to 1.00.
-    @ParameterizedTest(name = "{0} -> {1}")
-    @CsvSource({
-            "1000.9300000000001, 1000.93",
-            "1.005,              1.01"
-    })
-    void saveAppliedInterest_storesBalanceRoundedHalfUpToCents(double newBalance, BigDecimal expected) {
-        insertDeposit(1, "basic", 31, "1.00", null);
-        TimeDeposit deposit = repository.lockNextDue(CUTOFF, 0, 10).get(0);
-        deposit.setBalance(newBalance);
-
-        repository.saveAppliedInterest(List.of(deposit), TODAY);
-        flushAndClear();
-
-        assertThat(storedRows()).containsExactly(new StoredRow(1, expected, TODAY));
     }
 
     // --- both methods require the caller's (chunk) transaction --------------------------------
@@ -190,9 +190,9 @@ class TimeDepositPersistenceAdapterUpdateIT {
 
         @Test
         void saveAppliedInterest_fails() {
-            TimeDeposit deposit = new TimeDeposit(1, "basic", 1000.83, 31);
+            InterestPosting posting = new InterestPosting(1, new BigDecimal("1000.83"), TODAY);
 
-            assertThatThrownBy(() -> repository.saveAppliedInterest(List.of(deposit), TODAY))
+            assertThatThrownBy(() -> repository.saveAppliedInterest(List.of(posting)))
                     .isInstanceOf(IllegalTransactionStateException.class);
         }
     }
@@ -213,8 +213,8 @@ class TimeDepositPersistenceAdapterUpdateIT {
                         rs.getObject("last_interest_applied_on", LocalDate.class)));
     }
 
-    private static List<Integer> ids(List<TimeDeposit> deposits) {
-        return deposits.stream().map(TimeDeposit::getId).toList();
+    private static List<Integer> ids(List<DueTimeDeposit> deposits) {
+        return deposits.stream().map(due -> due.deposit().getId()).toList();
     }
 
     /** Due deposits (interest never applied). */

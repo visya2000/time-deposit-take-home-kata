@@ -2,18 +2,20 @@
 -- Covers every plan and the main interest boundaries. Repeatable migration (re-applied when this
 -- file changes) and idempotent: existing rows are kept (edits to them have no effect on an existing
 -- database), so balances updated by the endpoint survive.
--- To re-run interest on the same day: UPDATE time_deposits SET last_interest_applied_on = NULL;
+-- No deposit has received interest yet (markers NULL), so the first update back-fills every month
+-- owed since each deposit became eligible. Demo reset (posts all owed months again):
+-- UPDATE time_deposits SET last_interest_applied_on = NULL;
 
 INSERT INTO time_deposits (id, plan_type, days, balance) VALUES
     (1,  'basic',   30,  1000.00),    -- grace period: no interest
-    (2,  'basic',   31,  1200.00),    -- first day with interest: +1.00
+    (2,  'basic',   31,  1200.00),    -- first day with interest: one month, +1.00
     (3,  'student', 31,  1200.00),    -- +3.00
-    (4,  'student', 365, 1200.00),    -- last day with interest: +3.00
-    (5,  'student', 366, 1200.00),    -- after one year: no interest
+    (4,  'student', 365, 1200.00),    -- back-filled from day 31: 11 or 12 months by run date
+    (5,  'student', 366, 1200.00),    -- plan ended, but its first year is back-filled
     (6,  'premium', 45,  1200.00),    -- premium waiting period: no interest
     (7,  'premium', 46,  1200.00),    -- first premium day with interest: +5.00
     (8,  'gold',    100, 5000.00),    -- unknown plan: no interest
-    (9,  'basic',   45,  1234567.00), -- large balance: +1028.81
+    (9,  'basic',   45,  1234567.00), -- large balance: one month (day 31), +1028.81
     (10, 'basic',   31,  18.00)       -- double rounding edge: +0.01 (exact decimal maths: +0.02)
 ON CONFLICT (id) DO NOTHING;
 

@@ -2,14 +2,14 @@ package org.ikigaidigital.adapter.out.persistence;
 
 import org.ikigaidigital.TimeDeposit;
 import org.ikigaidigital.application.port.out.TimeDepositRepository;
+import org.ikigaidigital.domain.DueTimeDeposit;
+import org.ikigaidigital.domain.InterestPosting;
 import org.ikigaidigital.domain.TimeDepositWithWithdrawals;
 import org.ikigaidigital.domain.Withdrawal;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -40,25 +40,25 @@ class TimeDepositPersistenceAdapter implements TimeDepositRepository {
     // FOR UPDATE would run in auto-commit and release the locks immediately.
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
-    public List<TimeDeposit> lockNextDue(LocalDate cutoff, int afterId, int limit) {
+    public List<DueTimeDeposit> lockNextDue(LocalDate cutoff, int afterId, int limit) {
         return jpaRepository.lockNextDue(cutoff, afterId, limit).stream()
-                .map(entity -> new TimeDeposit(entity.getId(), entity.getPlanType(),
-                        entity.getBalance().doubleValue(), entity.getDays()))
+                .map(entity -> new DueTimeDeposit(
+                        new TimeDeposit(entity.getId(), entity.getPlanType(),
+                                entity.getBalance().doubleValue(), entity.getDays()),
+                        entity.getLastInterestAppliedOn()))
                 .toList();
     }
 
     /**
      * Updates the entities locked earlier in the same transaction (no extra SELECT); dirty checking
-     * flushes only these rows on commit, as batched UPDATEs. The double balance is re-quantised to
-     * cents on every write, so floating-point error never accumulates across runs.
+     * flushes only these rows on commit, as batched UPDATEs. Balances arrive already in cents.
      */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
-    public void saveAppliedInterest(List<TimeDeposit> deposits, LocalDate appliedOn) {
-        for (TimeDeposit deposit : deposits) {
-            TimeDepositEntity entity = jpaRepository.findById(deposit.getId()).orElseThrow();
-            entity.applyInterest(
-                    BigDecimal.valueOf(deposit.getBalance()).setScale(2, RoundingMode.HALF_UP), appliedOn);
+    public void saveAppliedInterest(List<InterestPosting> postings) {
+        for (InterestPosting posting : postings) {
+            jpaRepository.findById(posting.depositId()).orElseThrow()
+                    .applyInterest(posting.balance(), posting.lastInterestAppliedOn());
         }
     }
 

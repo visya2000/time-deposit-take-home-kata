@@ -42,14 +42,17 @@ Open **http://localhost:8080/swagger-ui.html** — it shows the contract file it
    the server answers `400`.
 3. **Update balances** — expand `POST /time-deposits/balance-updates` → *Try it out* →
    *Execute* → `204`.
-4. Run step 1 again: eligible deposits now include one month of interest, e.g. the demo data
-   changes `basic` 31 days 1200.00 → 1201.00, `student` 31 days 1200.00 → 1203.00, `premium`
-   46 days 1200.00 → 1205.00; deposits in their grace period, a student deposit older than one
-   year and the unknown plan `gold` are unchanged.
+4. Run step 1 again: every deposit got the interest it is owed since it became eligible (missed
+   months are back-filled — the demo data was never posted). E.g. `basic` 31 days 1200.00 →
+   1201.00, `student` 31 days 1200.00 → 1203.00, `premium` 46 days 1200.00 → 1205.00 (one month
+   each); the `student` deposits of 365 and 366 days get every month from day 31 until the plan
+   ends after one year — 11 or 12 postings depending on the run date (1200.00 → 1233.43 or
+   1236.51). Deposits in their grace period and the unknown plan `gold` are unchanged.
 5. Run step 3 again: nothing changes — interest is posted at most once per calendar month per
    deposit.
 
-**Re-run the interest on the same day** (demo only — it posts interest again):
+**Re-run the interest on the same day** (demo only — it posts all owed months again, as if the
+deposits had never received interest):
 
 ```bash
 docker compose exec postgres psql -U time_deposits -d time_deposits \
@@ -76,8 +79,8 @@ CI runs `./mvnw verify` on every push to `main` and on pull requests.
 | Suite | What it covers |
 |---|---|
 | `TimeDepositCalculatorTest` | Characterization of the original `updateBalance`: every plan boundary, rounding edges where `double` differs from exact decimal maths, unknown plans |
-| Strategy / service unit tests | Each plan's rule; a custom plan added through the extension point (`TimeDepositCalculatorStrategiesTest`); the balance-update run with in-memory fakes (chunks, idempotency, calendar months, failures, time zones) |
-| Persistence ITs | Schema, seed, single-statement GET, keyset pagination, due filter in SQL, rounding on write |
+| Strategy / service unit tests | Each plan's rule; a custom plan added through the extension point (`TimeDepositCalculatorStrategiesTest`); the balance-update run with in-memory fakes (chunks, idempotency, calendar months, failures, time zones, back-filling missed months); `InterestSchedule`, `Cents` |
+| Persistence ITs | Schema, seed, single-statement GET, keyset pagination, due filter in SQL, markers per deposit; `BalanceBackfillIT`: catch-up end to end |
 | `BalanceUpdateConcurrencyIT` | Parallel runs, non-blocking reads, `SKIP LOCKED`, no lost update |
 | `TimeDepositApiIT` | Both endpoints over HTTP, `Link` header, validation, Swagger UI |
 
@@ -102,7 +105,9 @@ org.ikigaidigital                  TimeDeposit (frozen), TimeDepositCalculator (
   keeps the original `double` expressions and rounding — results are identical ([ADR 0001](../docs/adr/0001-keep-double-interest-calculation.md)).
 - **Balance update**: deposits are processed in chunks (default 500, `interest.update.chunk-size`),
   one transaction per chunk, locked with `FOR UPDATE SKIP LOCKED`; a per-deposit marker makes it
-  idempotent and safe under concurrent calls ([ADR 0002](../docs/adr/0002-idempotent-monthly-balance-update.md)).
+  idempotent and safe under concurrent calls ([ADR 0002](../docs/adr/0002-idempotent-monthly-balance-update.md));
+  a late run back-fills every missed month as daily runs would have
+  ([ADR 0007](../docs/adr/0007-backfill-missed-months.md)).
 - **GET**: one SQL statement per request (consistent snapshot, no N+1), optional keyset pagination
   ([ADR 0003](../docs/adr/0003-single-statement-get-with-keyset-pagination.md)).
 - **Database**: Flyway migrations, snake_case names ([ADR 0004](../docs/adr/0004-snake-case-database-names.md)).
@@ -128,22 +133,32 @@ Ambiguities in the requirements, resolved as follows (also commented in the code
 2. The update endpoint is triggered **daily** by a scheduler; interest is posted **at most once
    per calendar month per deposit** (due again one calendar month after it was last applied, not
    30 days: each posting is a monthly rate). A second call in the same cycle changes nothing.
+   Missed months are owed: a late run (outage, a row locked during a run, a deposit never
+   posted) posts every owed month, judging eligibility by the deposit's age on each due date
+   and compounding month by month; the deposit keeps its monthly cycle.
 3. Withdrawals do not affect interest; whether they change `balance` is not specified.
 4. Unknown plan types, including a different case (`Basic`) and `null`, earn no interest.
    (The original code threw a `NullPointerException` for a `null` plan type after 30 days;
    invalid input is out of scope.)
 5. Database names are snake_case (`time_deposits`, `plan_type`, …); API names stay camelCase.
-6. One extra column, `time_deposits.last_interest_applied_on`, records when interest was last
-   applied; it is not exposed by the API.
+6. One extra column, `time_deposits.last_interest_applied_on`, records the scheduled due date of
+   the last interest posting; it is not exposed by the API.
 7. Business dates are computed in one configured zone (`interest.business-zone`, default `UTC`).
 8. Withdrawals are returned as `{ id, amount, date }` (the README does not define their shape).
 9. Ids are identity values, so new rows get increasing ids (the keyset cursors rely on this).
+10. Existing balances contain no interest yet: the first run back-fills every month since each
+    deposit became eligible. If an earlier system already posted interest, set
+    `last_interest_applied_on` by a data migration before the first run.
 
 ## Known limitations
 
-- **Missed runs are not back-filled**: after a scheduler outage a due deposit gets one posting,
-  not one per missed month, and its monthly cycle shifts. Whether missed months are owed is a
-  business decision (see PLAN.md §3 "Backfilling").
+- **Back-filling uses the current state**: withdrawals between missed due dates are not known
+  per date (no balance history), so missed months compound from the current balance; the plan
+  type is assumed constant. Months that earned nothing are re-evaluated on later runs, so a
+  plan type or balance changed by another system would earn interest for them retroactively.
+- **Back-filling assumes one contiguous eligibility window per plan** (true for basic, student
+  and premium): a future plan that becomes eligible again after a pause would be back-filled
+  only on its monthly due dates, not from the first day it is eligible again.
 - **`double` in the calculation**: kept on purpose (exact decimal maths changes results by a cent
   in edge cases); cents are exact only up to about 9×10¹³. Every write re-rounds to cents, so
   floating-point error does not accumulate.
@@ -154,15 +169,16 @@ Ambiguities in the requirements, resolved as follows (also commented in the code
   (the balance-update cursor starts after id 0) and is missing from paginated pages unless a
   negative `afterId` is passed; it is listed by the GET without parameters.
 - Deposits locked by another transaction during a run are skipped and processed by the next run
-  (at most one day late).
+  (at most one day late, posted for their original due date).
 - Deposits that never earn interest (unknown plan, student plan after one year, balances whose
-  interest rounds to 0.00) stay due, so every run re-evaluates and briefly locks them.
+  interest rounds to 0.00) stay due, so every run re-evaluates and briefly locks them; a
+  never-posted, never-eligible deposit is checked day by day since opening on every run.
 - The `Link` header is relative to the server root; a servlet context path or reverse-proxy path
   prefix would not be included (none is used).
 
 ## Possible enhancements
 
 Parallel balance-update workers over disjoint id ranges; asynchronous update (`202 Accepted`);
-back-filling missed months; filtering/paging by `days`; an interest posting audit table; exact
+filtering/paging by `days`; an interest posting audit table; exact
 decimal interest maths (a business decision); ArchUnit dependency rules; PgBouncer. Details in
 PLAN.md §11.

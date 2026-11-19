@@ -27,7 +27,8 @@ class TimeDepositEntity {
 
     private BigDecimal balance;
 
-    // Internal scheduling marker of the balance update (PLAN.md §3); not exposed by the API.
+    // Scheduled due date of the last interest posting (PLAN.md §3, ADR 0007; the V1 column comment
+    // predates the back-fill); not exposed by the API.
     private LocalDate lastInterestAppliedOn;
 
     // Unidirectional, loaded only by the GET fetch join.
@@ -53,6 +54,10 @@ class TimeDepositEntity {
 
     BigDecimal getBalance() {
         return balance;
+    }
+
+    LocalDate getLastInterestAppliedOn() {
+        return lastInterestAppliedOn;
     }
 
     List<WithdrawalEntity> getWithdrawals() {

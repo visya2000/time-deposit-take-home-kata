@@ -4,6 +4,8 @@ import org.ikigaidigital.application.port.in.GetAllTimeDepositsUseCase;
 import org.ikigaidigital.application.port.in.UpdateAllBalancesUseCase;
 import org.ikigaidigital.application.port.out.TimeDepositRepository;
 import org.ikigaidigital.application.port.out.TransactionRunner;
+import org.ikigaidigital.domain.DueTimeDeposit;
+import org.ikigaidigital.domain.InterestPosting;
 import org.ikigaidigital.domain.TimeDepositWithWithdrawals;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -173,10 +175,8 @@ class BalanceUpdateConcurrencyIT {
         insertDeposit(1, "1200.00");
 
         Future<Integer> externalUpdate = transactionRunner.inTransaction(() -> {
-            List<TimeDeposit> chunk = repository.lockNextDue(TODAY.minusMonths(1), 0, 10);
-            assertThat(chunk).extracting(TimeDeposit::getId).containsExactly(1);
-            TimeDeposit deposit = chunk.get(0);
-            deposit.setBalance(deposit.getBalance() + 1.00); // interest applied in memory
+            List<DueTimeDeposit> chunk = repository.lockNextDue(TODAY.minusMonths(1), 0, 10);
+            assertThat(chunk).extracting(due -> due.deposit().getId()).containsExactly(1);
 
             // Another writer (own connection, auto-commit) touches the row this chunk holds.
             Future<Integer> pendingUpdate = executor.submit(
@@ -186,7 +186,7 @@ class BalanceUpdateConcurrencyIT {
             awaitQuietly(pendingUpdate, 500);
             assertThat(pendingUpdate).as("external update waits for the chunk's row lock").isNotDone();
 
-            repository.saveAppliedInterest(chunk, TODAY);
+            repository.saveAppliedInterest(List.of(new InterestPosting(1, AFTER_ONE_POSTING, TODAY)));
             return pendingUpdate;
         }); // chunk committed here
 
