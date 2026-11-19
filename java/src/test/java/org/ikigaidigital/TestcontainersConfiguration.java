@@ -7,7 +7,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * PostgreSQL in Docker for integration tests; Spring starts it and points the datasource at it.
- * Contexts with the same configuration are cached, so the container is shared between test classes.
+ * Contexts with the same configuration are cached, so test classes with identical configuration
+ * share one container (classes with other properties or bean overrides get their own).
  */
 @TestConfiguration(proxyBeanMethods = false)
 public class TestcontainersConfiguration {
