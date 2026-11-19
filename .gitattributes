@@ -1,3 +1,4 @@
-# Hook scripts run in (Git) Bash — CRLF line endings would break them on Windows checkouts.
+# Scripts run by (Git) Bash need LF, Windows batch scripts need CRLF — regardless of checkout OS.
 *.sh text eol=lf
 mvnw text eol=lf
+*.cmd text eol=crlf
