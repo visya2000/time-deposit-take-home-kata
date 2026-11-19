@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–4 implemented (see §8).
+Status: **in progress** — steps 1–5 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -458,7 +458,9 @@ neither spec-exact nor readable).
 
 - **Java 17** — keep the existing `pom.xml` and its Java level (`maven.compiler.release=17`, so a
   newer local JDK cannot leak newer APIs). Single Maven module: the existing pom is extended.
-- Spring Boot — latest stable release supporting Java 17.
+- Spring Boot — latest stable release supporting Java 17: **4.1.2** (manages JUnit, AssertJ,
+  Surefire/Failsafe, Hibernate 7.4, Flyway, Testcontainers). Mockito is excluded from
+  `spring-boot-starter-test` — tests use in-memory fakes, enforced by the build.
 - **Maven Wrapper** (`mvnw`) — reproducible builds for reviewers, CI and hooks without a local
   Maven install.
 - Build plugins: Surefire (upgraded; `*Test`), Failsafe (`*IT`), JaCoCo (coverage report as a

@@ -1,0 +1,3 @@
+interest:
+  # Zone in which business dates (e.g. when interest was last applied) are computed.
+  business-zone: UTC
