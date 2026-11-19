@@ -3,6 +3,7 @@ package org.ikigaidigital;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 
 import java.time.Clock;
 import java.time.ZoneId;
@@ -11,6 +12,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(properties = "interest.business-zone=Asia/Tokyo")
+@Import(TestcontainersConfiguration.class)
 class TimeDepositApplicationIT {
 
     @Autowired

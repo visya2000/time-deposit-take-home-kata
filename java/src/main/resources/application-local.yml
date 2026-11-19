@@ -1,0 +1,9 @@
+# Local run against PostgreSQL from docker-compose.yml (demo credentials).
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/time_deposits
+    username: time_deposits
+    password: time_deposits
+  flyway:
+    # Demo data for manual testing via Swagger; never loaded in tests or other profiles.
+    locations: classpath:db/migration,classpath:db/seed

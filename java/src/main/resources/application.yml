@@ -1,3 +1,17 @@
 interest:
   # Zone in which business dates (e.g. when interest was last applied) are computed.
   business-zone: UTC
+
+# The datasource is configured per environment (SPRING_DATASOURCE_* variables, or the local
+# profile); tests use Testcontainers.
+spring:
+  jpa:
+    # Do not hold a DB connection for the whole HTTP request; lazy loads outside the adapter fail fast.
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 500  # balance updates are flushed as batched UPDATEs
+        order_updates: true
