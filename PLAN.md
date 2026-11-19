@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–5 implemented (see §8).
+Status: **in progress** — steps 1–6 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -637,7 +637,8 @@ benefit at this size.
 5. Spring Boot skeleton: parent, application class, configuration (`Clock`, calculator bean).
    Drop the local JUnit BOM, AssertJ and Surefire/Failsafe/compiler versions the Boot parent
    manages (keep JaCoCo), so Boot's dependency and plugin management applies.
-6. Domain read models, ports, GET use case in `TimeDepositService` + tests.
+6. Domain read models, ports, GET use case in `TimeDepositService` + tests. (The service is
+   registered as a bean in step 9, once a `TimeDepositRepository` implementation exists.)
 7. Balance-update use case (`TransactionRunner` port, chunked keyset loop) + tests.
 8. Flyway schema migration + `local`-profile seed + Testcontainers test setup.
 9. Persistence read adapter: HQL spike (fallbacks if needed), GET queries + tests.
