@@ -18,6 +18,11 @@ import java.util.stream.Collectors;
  * {@link InterestStrategy}; rounding stays here and is unchanged: the {@code double} interest is
  * rounded with {@code new BigDecimal(double)} to cents, HALF_UP (exact decimal maths would change
  * results at rounding edges, and the existing behaviour is declared correct).
+ *
+ * <p>Part of the shared kernel with {@link TimeDeposit} (see package-info): kept in this package
+ * because moving it would break its callers. Suggested to move into
+ * {@code org.ikigaidigital.domain.interest} (and {@code TimeDeposit} into
+ * {@code org.ikigaidigital.domain}) in a coordinated breaking release (ADR 0006).
  */
 public class TimeDepositCalculator {
 

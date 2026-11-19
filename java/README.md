@@ -83,7 +83,9 @@ CI runs `./mvnw verify` on every push to `main` and on pull requests.
 
 ## Architecture
 
-Hexagonal, one Maven module; dependencies point inwards.
+Hexagonal, one Maven module; dependencies point inwards. `TimeDeposit` and
+`TimeDepositCalculator` stay in the root package as a shared kernel — moving them would be a
+breaking change ([ADR 0006](../docs/adr/0006-shared-kernel-in-root-package.md)).
 
 ```
 org.ikigaidigital                  TimeDeposit (frozen), TimeDepositCalculator (signature/behaviour kept)
