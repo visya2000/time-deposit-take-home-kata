@@ -252,6 +252,8 @@ class TimeDepositApiIT {
     void contractFile_isServedAsIs() {
         client.get().uri("/openapi/time-deposits.yaml").exchange()
                 .expectStatus().isOk()
+                // A YAML type (not application/octet-stream), so a browser shows the file, not a download.
+                .expectHeader().contentTypeCompatibleWith("application/yaml")
                 .expectBody(String.class).value(yaml -> assertThat(yaml)
                         .contains("openapi: 3.0.3")
                         .contains("/time-deposits/balance-updates:"));

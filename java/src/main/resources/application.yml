@@ -5,6 +5,12 @@ interest:
     # Deposits locked and updated per transaction by the balance update.
     chunk-size: 500
 
+server:
+  mime-mappings:
+    # Serve the OpenAPI contract (static/openapi/*.yaml) as YAML, not application/octet-stream,
+    # so a browser shows it instead of downloading it.
+    yaml: application/yaml
+
 # The datasource is configured per environment (SPRING_DATASOURCE_* variables, or the local
 # profile); tests use Testcontainers.
 spring:
