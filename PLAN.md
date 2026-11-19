@@ -1,0 +1,713 @@
+# Implementation Plan — Time Deposit Kata (Java)
+
+Status: **planning only** — no code changes or commits yet.
+
+Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
+architecture & dependency review → dead code removal → final code review → full test suite run.
+
+---
+
+## 1. Requirements analysis
+
+### What exists vs. what is missing
+
+| Area | State |
+|---|---|
+| Interest logic (`TimeDepositCalculator.updateBalance`) | Exists. Declared correct — **behaviour must stay identical**. |
+| Tests | Effectively none — `TimeDepositCalculatorTest` only asserts `1 == 1`. |
+| Withdrawals | Missing entirely (no domain type), but required in the DB and in the GET response. |
+| REST API, database, OpenAPI contract | Missing (project has only JUnit + AssertJ, no Spring, no DB). |
+| AI-assisted development documentation | Missing. |
+
+### Requirements coverage
+
+| README requirement | Where in this plan |
+|---|---|
+| Endpoint to update balances of all deposits | §3, §5 (`POST /time-deposits/balance-updates`) |
+| Endpoint to get all deposits (`id, planType, balance, days, withdrawals`) | §3 GET, §5 |
+| Tables `timeDeposits`, `withdrawals` | §4 (snake_case, justified) |
+| Basic 1 %, Student 3 % (none after 1 year), Premium 5 % (after 45 days), 30-day grace | §1 behaviour, §6 characterization tests |
+| No breaking change to `TimeDeposit`, `updateBalance` signature and behaviour kept | §1 constraints, §2, protect hook (§7) |
+| Extensible interest design, SOLID | §2 strategy pattern, single registration point |
+| Exactly two endpoints | §5 |
+| Ambiguities resolved by justified assumptions (in code comments) | §1 Assumptions |
+| AI harness, documented and reproducible | §7 |
+| OpenAPI contract, hexagonal architecture, atomic commits, Testcontainers | §5, §2, §8, §6 |
+| Swagger instructions for triggering the endpoints | §8 step 13 |
+
+### Constraints
+
+- `TimeDeposit` stays untouched: same package (`org.ikigaidigital`), constructor, getters, `Double balance`.
+- `updateBalance(List<TimeDeposit>)` keeps its signature **and its observable behaviour**.
+- `new TimeDepositCalculator()` (no-arg constructor) keeps working.
+- Exactly **two** API endpoints.
+- Database: **PostgreSQL** (required).
+- Invalid-input / exception handling is out of scope (the only input rule is the declared range
+  of the `limit` query parameter, enforced by generated validation — §3 GET).
+
+### Current behaviour of `updateBalance` (locked in by characterization tests)
+
+- No interest while `days <= 30` (interest starts on day 31).
+- **Basic**: 1 % p.a. when `days > 30`.
+- **Student**: 3 % p.a. only while `days < 366` → day 365 still earns interest, day 366 does not.
+- **Premium**: 5 % p.a. only when `days > 45` → starts on day 46.
+- Monthly interest = `balance * rate / 12`, computed in `double`; rounded with
+  `new BigDecimal(double).setScale(2, HALF_UP)`; added back to the balance as `double`.
+- Unknown plan type (incl. different case, e.g. `"Basic"`) → no interest, no exception.
+- Only `balance` is modified; `id`, `planType`, `days` are never touched. The update endpoint
+  therefore persists only the **balance** plus the internal scheduling marker
+  (`last_interest_applied_on`, §3) — `days` is left as is.
+
+### Weaknesses in the existing code
+
+- Plan rules are hard-coded in a nested if/else chain with magic strings → every new plan
+  requires editing the method (violates Open/Closed).
+- One loop mixes rule selection, interest calculation and balance mutation (violates SRP).
+- Index-based loop with repeated `xs.get(i)` hurts readability.
+- `double` for money — frozen by the "no breaking changes" constraint, so it is contained
+  rather than propagated (converted to `BigDecimal` only at the persistence/API boundary).
+- The only test asserts nothing.
+
+### Assumptions (justified in code comments and listed in the project README)
+
+1. `days` is the deposit's age in days, maintained by another system and current as of today.
+2. The balance-update endpoint is triggered **daily** by a scheduler. Interest is **monthly per
+   deposit**: each deposit is posted at most once per calendar month on its own cycle, so a
+   second call in the same cycle changes nothing (idempotent by design — stated in the OpenAPI
+   description of the POST).
+3. Withdrawals do not affect interest (no such rule in the README); whether withdrawals change
+   `balance` is not specified.
+4. Unknown plan types earn no interest (existing behaviour, preserved).
+5. DB names are snake_case; API names are camelCase as in the README (§4).
+6. One extra column, `time_deposits.last_interest_applied_on`, is added beyond the README schema
+   (§3); it is not exposed by the API.
+7. Missed runs are not back-filled (§3 — to be discussed).
+8. Business dates are computed in a configured zone, default `UTC` (§3).
+9. Withdrawals are returned as `{ id, amount, date }` (README does not define the inner shape).
+10. Ids are generated by an identity column, so new deposits get increasing ids (§4).
+
+---
+
+## 2. Target architecture — Hexagonal (single Maven module)
+
+```
+org.ikigaidigital
+├── TimeDeposit, TimeDepositCalculator          ← unchanged location (shared contract)
+├── domain
+│   ├── interest/   InterestStrategy, InterestStrategies (default set),
+│   │               BasicInterestStrategy, StudentInterestStrategy, PremiumInterestStrategy
+│   ├── Withdrawal                    (record)
+│   ├── TimeDepositWithWithdrawals    (read model for GET)
+│   └── TimeDepositPage               (read model: items + hasNext)
+├── application
+│   ├── port/in     UpdateAllBalancesUseCase, GetAllTimeDepositsUseCase
+│   ├── port/out    TimeDepositRepository, TransactionRunner
+│   └── TimeDepositService            (implements both use cases)
+└── adapter
+    ├── in/web            controller implementing the generated OpenAPI interface, DTO mapping,
+    │                     Link header
+    ├── out/persistence   TimeDepositEntity, WithdrawalEntity, Spring Data repository
+    │                     (HQL for reads, native SQL for the locking update), mappers,
+    │                     repository adapter, TransactionTemplate-based TransactionRunner
+    └── config            beans: Clock, TimeDepositCalculator
+```
+
+- Domain is plain Java: no Spring/JPA annotations. The calculator is exposed as a bean via a
+  `@Configuration` class in the adapter/config layer.
+- Dependency direction: `adapter → application → domain`, never the reverse.
+  Guarded by code review and the `architecture-reviewer` subagent (ArchUnit: §11).
+- Per-chunk transactions: the application service owns the flow and the business rule
+  ("mark only deposits whose balance changed") and calls a tiny `TransactionRunner` outbound
+  port; the adapter implements it with Spring's `TransactionTemplate`. The application layer
+  stays free of Spring (`@Transactional`) and is unit-testable with a fake.
+
+### Interest refactoring — Strategy pattern
+
+```java
+public interface InterestStrategy {
+    String planType();
+    double monthlyInterest(TimeDeposit deposit); // unrounded; same double expression as today
+}
+```
+
+- Each plan implementation owns its full eligibility rule (30-day grace period + its own
+  limit). The README says the grace period applies to "existing plans", implying a future plan
+  may differ — so it is not hard-wired into the calculator. Adding a plan = adding one class.
+- **Single registration point**: `InterestStrategies.defaults()` returns the default set. Both
+  the no-arg `TimeDepositCalculator()` and the Spring configuration use it, so a new plan is
+  registered in exactly one place.
+- `TimeDepositCalculator`:
+  - keeps the no-arg constructor (uses `InterestStrategies.defaults()`);
+  - gains a constructor accepting `Collection<InterestStrategy>` (extension point / tests);
+  - resolves the strategy from an immutable `Map<String, InterestStrategy>`; unknown plan →
+    zero interest;
+  - rounding and adding the interest stay in the calculator, identical in effect.
+- **No BigDecimal arithmetic inside the calculation.** Switching would change results at
+  rounding edges, and the README states the current behaviour is correct. The floating-point
+  expressions (`balance * 0.03 / 12`, etc.) keep the same operand order.
+
+### Money types: BigDecimal everywhere except the frozen calculation
+
+Measured over every balance 0.01–100,000.00, exact BigDecimal maths differs from the current
+`double` algorithm by 1 cent for 3,019 (basic), 17,069 (student) and 10,216 (premium) of 10M
+balances. Example: basic, 18.00 → current code 18.01 (`18 * 0.01 / 12` = `0.01499999…` in
+double); exact maths 18.02. So BigDecimal inside `updateBalance` is a behaviour change, not a
+refactoring — and `TimeDeposit.balance` is `Double` in a frozen class.
+
+- DB: `NUMERIC(19,2)`; API: `BigDecimal`; `Withdrawal.amount`: `BigDecimal` (new class).
+- `double` lives only transiently inside one calculation. The persistence adapter converts with
+  `BigDecimal.valueOf(d).setScale(2, HALF_UP)`, so every write re-quantises to cents and float
+  error never accumulates across runs (e.g. `1000.10 + 0.83 = 1000.9300000000001` in double →
+  stored `1000.93`); the DB is the source of truth.
+- Precision limit (documented): `double` represents cents exactly only up to about 9×10¹³,
+  while `NUMERIC(19,2)` allows larger values — a consequence of the frozen `Double` contract.
+- Recorded as tech debt in an ADR: moving the calculation to exact decimal maths is a business
+  decision (it changes customer balances) — contained to the strategies + calculator.
+
+---
+
+## 3. Balance update: idempotency, scalability, concurrency
+
+### Model: per-deposit monthly cycle
+
+Deposits start on different days, so interest is due per deposit, not per calendar run.
+`time_deposits.last_interest_applied_on DATE NULL` records the business date interest was last
+applied (`NULL` = never).
+
+- `today` = `LocalDate.now(clock)`, where `clock` is a `Clock` bean in a configured business
+  zone (`interest.business-zone`, default `UTC`) — never the server's default zone, so servers
+  in different time zones agree. Computed **once per run**, so a run spanning midnight is
+  consistent. Tests use `Clock.fixed`.
+- **Due** ⇔ `last_interest_applied_on IS NULL OR last_interest_applied_on <= today.minusMonths(1)`.
+  The cutoff is computed in Java and passed as a parameter (single source of the rule).
+- **1 calendar month, not 30 days** (commented in code): interest per posting is `rate / 12`,
+  so postings must be monthly. 30-day cycles would give ~12.17 postings/year and overpay ~1.4 %
+  of annual interest. Simulated over every start date 2024–2027 with daily runs: at most
+  12 postings in any 1-year window, gaps 28–31 days. Month-end anchors drift to the next valid
+  day (Jan 31 → due Mar 1 → then the 1st), never two postings within a month.
+- **Marker advances only when the balance changed** (interest ≠ 0). Deposits still in a
+  grace period (≤ 30 days, premium ≤ 45) are re-checked every run and get their first interest
+  as soon as they become eligible, then monthly from that date. Never-again-eligible deposits
+  (student > 365 days, unknown plan, interest rounding to 0.00) are re-evaluated every run
+  without effect — harmless, idempotent.
+- The endpoint is meant to be triggered **daily** by a scheduler (documented). Called less
+  often it degrades gracefully to a less frequent batch; it never double-applies.
+
+### Run algorithm (application service, single-threaded)
+
+```
+today = LocalDate.now(clock); cutoff = today.minusMonths(1); lastId = 0
+loop:
+  lastId = tx.inTransaction(() -> {
+      chunk  = repo.lockNextDue(cutoff, afterId = lastId, size)   // SQL below
+      if chunk empty -> return DONE
+      before = balances of chunk
+      calculator.updateBalance(chunk)                              // unchanged, frozen
+      repo.saveAppliedInterest(deposits whose balance changed, today)
+      return max id in chunk
+  })
+until DONE
+```
+
+```sql
+SELECT td.* FROM time_deposits td
+WHERE td.id > :afterId
+  AND (td.last_interest_applied_on IS NULL OR td.last_interest_applied_on <= :cutoff)
+ORDER BY td.id
+LIMIT :size
+FOR UPDATE SKIP LOCKED;
+```
+
+- The **`id > :afterId` keyset cursor is essential**, not just a pagination detail: deposits
+  that stay due (unchanged balance, marker not advanced) would otherwise be returned again by
+  every chunk query → infinite loop. With the cursor, every row is evaluated at most once per
+  run. An empty table simply yields an empty first chunk.
+- Rows inserted during a run get higher ids (identity), so they are reached by the cursor in
+  the same run or picked up by the next one.
+- The locking query is a Spring Data **native query** returning managed `TimeDepositEntity`s.
+  It selects **all** columns (`td.*`): Hibernate can only build an entity from a result row
+  that contains every mapped column, including the marker.
+- Writes: `saveAppliedInterest` sets `balance` and `last_interest_applied_on` on the entities
+  already loaded in the same transaction (no extra SELECT), only for deposits whose balance
+  changed; on commit Hibernate's dirty checking flushes **only those**, as batched `UPDATE`s
+  (`hibernate.jdbc.batch_size=500`, `order_updates=true`). Each chunk is its own transaction, so
+  the persistence context is cleared per chunk and never grows.
+- Defaults: chunk size 500; Hikari default pool (10). The request thread holds no connection
+  outside the chunk transactions (`open-in-view=false`).
+
+### Correctness under failure and concurrency
+
+| Scenario | Outcome |
+|---|---|
+| Endpoint called twice the same day / client retry after timeout | Deposits posted today are no longer due → no-op for them. |
+| Crash or error mid-run | Committed chunks are marked; the failed chunk rolls back atomically; the next run continues with the rest. No partial chunk, no double posting. |
+| Two runs at once (same or different instances) | `FOR UPDATE SKIP LOCKED`: a row is processed by exactly one run; the other skips it. PostgreSQL re-checks the `WHERE` on the latest committed row version when locking, so a row another run just posted is no longer due. |
+| Other writers on a row we hold (balance updates, withdrawal inserts) | They wait until our chunk commits (ms) — intended: interest is applied before a concurrent withdrawal. No lost update; `@Version` not needed. A withdrawal insert waits too, because its foreign-key check takes `FOR KEY SHARE` on the deposit row, which conflicts with `FOR UPDATE`. |
+| Row locked by any other transaction when we reach it (another run, an in-flight withdrawal, …) | Skipped (`SKIP LOCKED`); still due → processed by the next run (at most one day late). Accepted. |
+| Deadlocks | Our `SELECT` never waits (`SKIP LOCKED`), our `UPDATE`s touch only rows we already hold → we never wait on others. |
+| Servers in different time zones / small clock skew | Same configured zone → same `today`. A double posting would need a skew of ~1 month. |
+| Scheduler outage of N days | Due deposits are posted once on the next run; their cycle shifts by N days. Missed months are **not** back-filled — known limitation, **to be discussed** (below). |
+| First deployment | All markers `NULL` → every eligible deposit is posted on the first run; cycles anchor to that date. |
+
+Alternative considered: `FOR NO KEY UPDATE SKIP LOCKED` would not block withdrawal inserts (FK
+checks) and would not skip deposits with an in-flight withdrawal insert, while still excluding
+concurrent runs and balance `UPDATE`s. Not chosen: having concurrent writers wait for the
+interest posting is the intended ordering.
+
+### Locking model: writes lock, reads never block
+
+PostgreSQL MVCC: plain `SELECT`s take no row locks and are never blocked by `FOR UPDATE` or
+`UPDATE`; they see the last committed row version.
+
+| Operation | Locks | Blocked by an update run? |
+|---|---|---|
+| `GET` (plain `SELECT`) | none | Never — may return data a few ms stale (accepted: a refresh shows the update). |
+| Update run | row locks, one short chunk transaction at a time | Never waits (`SKIP LOCKED`). |
+| Other writer on a row we hold | waits | Only until our chunk commits (ms). |
+
+### Backfilling missed runs — not implemented, to be discussed
+
+If the daily run does not happen (outage, scheduler failure), the current design has these
+problems:
+
+1. **Lost months** — a deposit that missed several due dates receives only one posting when runs
+   resume.
+2. **Shifting cycle** — the marker is set to the date the run happened, so the deposit's monthly
+   date moves permanently by the length of the outage.
+3. **Eligibility for past months** — the calculator reads the *current* `days`; a catch-up for a
+   past month would need the deposit's age at that due date (e.g. a student deposit now at
+   380 days that missed its month at 350 days; a premium deposit now at 50 days that missed a
+   month at 20 days).
+4. **Month-end drift** — related: deposits whose cycle falls on the 29th–31st normalise to an
+   earlier day after short months.
+5. **Balance history** — exact catch-up would need the balance as of each missed due date (e.g.
+   withdrawals in between); no balance history exists, and whether withdrawals change `balance`
+   is unspecified.
+6. **First posting** — if an outage covers the moment a new deposit first becomes eligible, the
+   date it *would* have become eligible is plan-specific (31 days, premium 46) and not derivable
+   generically.
+
+Direction discussed (not adopted): store the schedule instead of the run date
+(`next_interest_due_on` + `interest_day_of_month` anchor), catch up all missed months within
+the same locked chunk transaction, evaluating each month with
+`daysAtDue = days − DAYS.between(dueDate, today)` on a temporary `TimeDeposit` copy (frozen
+calculator unchanged; on-time runs give `daysAtDue == days`, i.e. identical behaviour).
+Idempotency and concurrency guarantees would be unchanged. Decision deferred: it is a business
+decision (are missed months owed?) with the open points above.
+
+### Cost
+
+- Each run walks the primary key once (`O(n)` index reads), locks and evaluates the due rows
+  chunk by chunk and writes only changed rows. Memory is `O(chunk size)`; each chunk is a short
+  transaction (no long-held locks, no growing persistence context).
+- Rough estimate (not measured): 6–15k rows/s → 10M deposits in ~10–30 min for a daily job.
+  If that is not enough: parallel workers (§11), measured first.
+- No index on `last_interest_applied_on`: with keyset-by-id ordering PostgreSQL would not use it.
+- Only `balance` and the marker change and neither is indexed, so PostgreSQL *can* use HOT
+  (in-place) updates when the page has free space; a lower `fillfactor` is an option only if
+  measurements show a need.
+- Synchronous endpoint: at very large sizes the HTTP call can time out. That is safe (the server
+  finishes; a retry is a no-op or shares the work). Options: §11.
+
+### GET endpoint
+
+**Optional keyset pagination** (still the one GET endpoint):
+
+- No parameters → **all** deposits (README behaviour, backward-compatible).
+- `limit` (1–1000) + optional `afterId` (default: start) → one page, ordered by `id`. If only
+  `afterId` is given, `limit` defaults to 100. The range is declared in the OpenAPI contract and
+  enforced by the generator's bean validation (`useBeanValidation`) → out-of-range values get an
+  automatic `400` (no hand-written error handling). Without it, `limit=0` would yield an empty
+  page with a `next` link pointing nowhere.
+- Response body is the **same array** in both modes (no second response shape). When a next
+  page exists: `Link: </time-deposits?afterId=<last id>&limit=<n>>; rel="next"` (RFC 8288),
+  declared in the contract. No total count (`COUNT(*)` is expensive on large tables).
+- Keyset instead of offset (`page`/`size`): constant cost per page regardless of depth (PK
+  index), and stable while data changes between requests — ordered by immutable, increasing
+  `id`, so no duplicates or skipped rows. Trade-off: no "jump to page N".
+
+**HQL (Hibernate 6 JPQL superset), one SQL statement per request:**
+
+```java
+// paginated — called with limit + 1
+@Query("""
+    SELECT d FROM TimeDepositEntity d LEFT JOIN FETCH d.withdrawals w
+    WHERE d.id IN (SELECT d2.id FROM TimeDepositEntity d2
+                   WHERE d2.id > :afterId ORDER BY d2.id LIMIT :limit)
+    ORDER BY d.id, w.id""")
+List<TimeDepositEntity> findPage(int afterId, int limit);
+
+// unpaginated
+@Query("SELECT d FROM TimeDepositEntity d LEFT JOIN FETCH d.withdrawals w ORDER BY d.id, w.id")
+List<TimeDepositEntity> findAllWithWithdrawals();
+```
+
+- The `LIMIT` is inside the subquery, never on the fetch-join query itself (no `setMaxResults`),
+  so Hibernate does not paginate in memory, and the limit counts **deposits**, not joined rows.
+- `ORDER BY d.id, w.id` makes the withdrawal order within a deposit deterministic (stable API
+  output and tests).
+- Paginated: fetch `limit + 1` deposits; the extra one only signals a next page (→ `Link`
+  header) and is dropped. The use case returns a `TimeDepositPage(items, hasNext)`; the web
+  adapter builds the `Link` header from it.
+- Hibernate de-duplicates root entities from the join (no manual grouping); a deposit without
+  withdrawals gets an empty collection → `withdrawals: []`. Entities are mapped to the domain
+  read model inside the adapter's `@Transactional(readOnly = true)` method (no dirty-checking
+  snapshots).
+- `LIMIT` in a subquery is **Hibernate-specific HQL, not standard JPQL**; PostgreSQL supports
+  `IN (SELECT … LIMIT n)` (some databases, e.g. MySQL, do not) — acceptable, PostgreSQL is
+  required.
+- **Verify first (step 9):** a Testcontainers spike that Spring Data's `@Query` parser accepts
+  the subquery `LIMIT` and that it runs as one statement. Fallbacks, in order: the same HQL via
+  `EntityManager.createQuery` in a custom repository fragment (bypasses Spring Data's parser);
+  native SQL (deposits limited in a derived table, `LEFT JOIN` withdrawals) with manual row
+  grouping.
+- Indexes: PK serves the subquery's `ORDER BY id LIMIT`; `withdrawals.time_deposit_id` serves
+  the join.
+
+**Consistency (read skew) — why no `REPEATABLE READ`:** under PostgreSQL's default
+`READ COMMITTED`, each *statement* gets its own snapshot ("a SELECT sees only data committed
+before the query began"). Two statements (e.g. deposits, then withdrawals) could mix two points
+in time. The GET is **one** statement in both modes, so a response always comes from one
+snapshot. (The `READ COMMITTED` re-check of newer row versions applies only to `UPDATE` /
+`SELECT … FOR UPDATE`, not to a plain `SELECT`.) The query takes no locks. If the GET ever has
+to become two statements, wrap them in a `REPEATABLE READ` read-only transaction.
+
+Guard: a test asserts the GET executes exactly one SQL statement in both modes (Hibernate
+statistics, `prepareStatementCount == 1`) — protects the snapshot guarantee and prevents N+1.
+
+**Accepted staleness:** a GET during an update run may show some deposits already updated and
+others not (the run commits per chunk). Across pages, each page is its own snapshot (page 1
+before a run, page 2 after) — keyset still guarantees no duplicates or skipped rows.
+
+The unpaginated mode still loads everything into memory; pagination is the scalable path and
+is recommended for large datasets (documented in the README).
+
+**Entities:**
+- `TimeDepositEntity` — loaded and dirty-flushed by the update path; has a unidirectional
+  `@OneToMany(fetch = LAZY) @JoinColumn(name = "time_deposit_id") List<WithdrawalEntity>`
+  used only by the GET fetch join (the update's native query never touches it). `@Id` without
+  `@GeneratedValue` (the application never inserts deposits).
+- `WithdrawalEntity` — read-only use, **no back-reference** to the deposit (a default-EAGER
+  `@ManyToOne` could trigger extra statements and break the single-statement guarantee).
+- With `open-in-view=false`, an accidental lazy load outside the adapter's transaction throws
+  instead of silently issuing another statement.
+
+### Other
+
+- Schema owned by **Flyway** migrations (`db/migration`). Demo seed data lives in a separate
+  location (`db/seed`) enabled only by the `local` profile, so integration tests start from an
+  empty schema and control their own data. The seed covers every plan and the main boundaries
+  (e.g. 30/31 days, premium 45/46, student 365/366, an unknown plan, deposits with and without
+  withdrawals) for manual testing via Swagger.
+- Manual re-run of interest for demos (documented in the README):
+  `UPDATE time_deposits SET last_interest_applied_on = NULL;`
+- Considered and rejected: an `interest_postings` ledger per calendar month (puts every deposit
+  on the same calendar cycle and grows by deposits × 12 rows/year; its only extra value, an
+  audit trail, is not required — §11), and an `Idempotency-Key` header (covers client retries
+  only, not concurrent runs or partial failures).
+
+---
+
+## 4. Database schema
+
+| Table | Column | Type | Constraints |
+|---|---|---|---|
+| `time_deposits` | `id` | `INTEGER` | PK, `GENERATED BY DEFAULT AS IDENTITY` |
+| | `plan_type` | `VARCHAR` | NOT NULL |
+| | `days` | `INTEGER` | NOT NULL |
+| | `balance` | `NUMERIC(19,2)` | NOT NULL |
+| | `last_interest_applied_on` | `DATE` | NULL — **addition** beyond the README schema (§3); not exposed by the API |
+| `withdrawals` | `id` | `INTEGER` | PK, `GENERATED BY DEFAULT AS IDENTITY` |
+| | `time_deposit_id` | `INTEGER` | NOT NULL, FK → `time_deposits.id`, indexed |
+| | `amount` | `NUMERIC(19,2)` | NOT NULL |
+| | `date` | `DATE` | NOT NULL |
+
+- Identity ids: inserts by other systems get increasing ids without coordination — the keyset
+  cursors (update run, pagination) rely on that. `BY DEFAULT` still allows explicit ids in seeds
+  and tests.
+- PostgreSQL does not index foreign keys automatically → explicit index on
+  `withdrawals.time_deposit_id`.
+
+### Naming: why not literally `timeDeposits` / `planType`?
+
+PostgreSQL folds **unquoted** identifiers to lower case. `CREATE TABLE timeDeposits (planType ...)`
+actually creates `timedeposits` with column `plantype` — the camelCase is silently lost.
+Keeping the exact spelling requires double quotes (`"timeDeposits"`, `"planType"`) in every
+migration and query, which is error-prone and non-idiomatic.
+
+**Decision: snake_case** (`time_deposits`, `plan_type`, `time_deposit_id`).
+
+- It is the PostgreSQL convention — no quoting anywhere in migrations or SQL.
+- Spring Boot's default Hibernate naming strategy maps entity fields `planType` → `plan_type`
+  automatically, so entities need no explicit `@Column` names.
+- The API keeps the README's camelCase field names (`planType`, …); only the physical DB
+  names differ.
+- The deviation from the README is justified in a comment in the Flyway migration and listed
+  in the project README's assumptions section.
+
+Alternatives considered and rejected: quoted camelCase (spec-exact, but quoting everywhere is
+noisy and error-prone in native SQL); unquoted camelCase (silently folded to `timedeposits` —
+neither spec-exact nor readable).
+
+`date` is a non-reserved keyword in PostgreSQL, so it works as a column name unquoted.
+
+---
+
+## 5. Stack and API
+
+- **Java 17** — keep the existing `pom.xml` and its Java level (`maven.compiler.release=17`, so a
+  newer local JDK cannot leak newer APIs). Single Maven module: the existing pom is extended.
+- Spring Boot — latest stable release supporting Java 17.
+- **Maven Wrapper** (`mvnw`) — reproducible builds for reviewers, CI and hooks without a local
+  Maven install.
+- Build plugins: Surefire (upgraded; `*Test`), Failsafe (`*IT`), JaCoCo (coverage report as a
+  guide only, no threshold gate).
+- PostgreSQL + **Spring Data JPA** + Flyway. JPA keeps entities/repositories available for future
+  growth; where control matters (the `FOR UPDATE SKIP LOCKED` keyset query) a **native query**
+  is used. Plain JDBC remains possible on the same connection/transaction if ever needed.
+  Settings:
+  - `spring.jpa.open-in-view=false` — the default would hold a DB connection for the whole HTTP
+    request;
+  - `spring.jpa.hibernate.ddl-auto=validate` — Flyway owns the schema;
+  - `hibernate.jdbc.batch_size=500`, `hibernate.order_updates=true` — batched dirty-flush updates.
+- **Contract-first OpenAPI**: `src/main/resources/openapi/time-deposits.yaml` →
+  `openapi-generator-maven-plugin` (`interfaceOnly`, `useBeanValidation`) → controller
+  implements the interface (compile-time guarantee that the code matches the contract).
+  - Swagger UI (springdoc) is configured to serve **this contract file**, so the contract stays
+    the single source of truth (no regenerated spec).
+  - `planType` is a plain `string`, not an enum — unknown plans exist (zero interest) and new
+    plans must not require a contract change.
+  - The POST description states the monthly-idempotency semantics (Assumption 2).
+- Testcontainers (PostgreSQL); `docker-compose.yml` for running PostgreSQL locally.
+- No Spring Boot Actuator (it would add endpoints). Swagger UI / `/v3/api-docs` are
+  documentation tooling the README explicitly asks for, not business endpoints.
+
+### Endpoints
+
+| Method | Path | Response |
+|---|---|---|
+| `GET` | `/time-deposits` (optional `limit` 1–1000, `afterId`) | `200` — `[{ id, planType, balance, days, withdrawals: [{ id, amount, date }] }]`; `Link: …; rel="next"` header when paginated and more data exists; `400` for out-of-range `limit` (generated validation) |
+| `POST` | `/time-deposits/balance-updates` | `204 No Content` (also when nothing was due) |
+
+`POST`: the call triggers a process that changes state; it is safe to repeat (§3) but is
+not a "replace this resource" operation, so `PUT` would be misleading.
+
+---
+
+## 6. Test strategy (tests before refactoring)
+
+**Naming convention** (fast and slow suites run separately):
+- `*Test.java` — unit tests, no Docker → `./mvnw test` (Surefire).
+- `*IT.java` — Testcontainers / Spring context tests → `./mvnw verify` (Failsafe).
+
+1. **Characterization tests** for `TimeDepositCalculator` (parameterized), run against the
+   *current* implementation first, replacing the no-op test:
+   - grace boundary 30 / 31 days for **each** plan (basic, student, premium);
+   - premium inside its own window (e.g. 40 days → no interest) and boundary 45 / 46;
+   - student boundary 365 / 366;
+   - unknown plan type → balance unchanged; different case (`"Basic"`) → treated as unknown;
+   - zero balance → stays zero;
+   - the original test's scenario as a real assertion: basic, 1,234,567.00, 45 days →
+     **1,235,595.81**;
+   - a HALF_UP boundary where `double` differs from exact decimal maths:
+     basic 18.00 → **18.01** (exact maths would give 18.02);
+   - empty list; mixed list — each deposit updated independently;
+   - non-balance fields untouched.
+2. **Strategy unit tests** — only each plan's own boundaries; no duplication of (1).
+   Calculator with a custom strategy collection: a new plan is applied without touching
+   existing strategies (extension point).
+3. **Application service tests** with in-memory fakes (no mocking frameworks) and `Clock.fixed` —
+   assert outcomes:
+   - all due deposits updated across multiple chunks (chunk size smaller than the data set);
+   - run terminates when many deposits stay due (ineligible) — guards the infinite-loop trap;
+   - empty repository; single deposit;
+   - same-day second run is a no-op;
+   - due again exactly one calendar month later, not before (Jan 31 → not due Feb 28, due
+     Mar 1); leap year (Jan 31 2028 → not due Feb 29, due Mar 1);
+   - marker advanced only for deposits whose balance changed; a deposit in grace gets interest
+     on the first run after becoming eligible;
+   - failure in a middle chunk: earlier chunks stay applied, the failed chunk is unchanged, a
+     re-run completes the rest without double posting;
+   - the business date comes from the clock's zone: `Clock.fixed(2026-11-30T23:30Z, Asia/Tokyo)`
+     → marker `2026-12-01` (catches `LocalDate.now()` without the clock);
+   - GET use case: `hasNext` / items passed through for paginated and unpaginated calls.
+4. **Persistence adapter tests** — Testcontainers PostgreSQL:
+   - mapping and decimal scale; write rounding (`1000.10 + 0.83` → stored `1000.93`);
+   - due filter + keyset cursor;
+   - update writes balance and marker only for changed deposits (unchanged rows keep marker
+     `NULL` and are not updated);
+   - GET: withdrawals grouped per deposit, ordered by id; deposit without withdrawals → empty
+     list; empty table → empty list;
+   - GET executes **exactly one SQL statement** in both modes (Hibernate statistics enabled in
+     the test profile);
+   - pagination: a page holds exactly `limit` deposits even when they have many withdrawals;
+     next-page detection at the exact boundary (rows = limit, limit + 1); last page; `afterId`
+     beyond max id → empty; walking all pages yields every deposit exactly once.
+5. **Concurrency tests** — Testcontainers:
+   - two runs in parallel over a few thousand deposits; every eligible deposit receives
+     interest exactly once;
+   - reads are not blocked: while another transaction holds the update run's row locks, GET
+     returns immediately with the last committed balances;
+   - a row locked by another transaction is skipped and gets its interest on the next run;
+   - an external balance update on a row in a chunk waits for the chunk to commit and is applied
+     on top of the new balance (no lost update).
+6. **End-to-end tests** — `@SpringBootTest` + Testcontainers, over HTTP:
+   - GET returns the README schema; empty DB → `[]`;
+   - POST → `204`, GET shows updated balances; second POST → balances unchanged;
+   - pagination: `Link` header present when more data exists, absent on the last page;
+     `afterId` alone → 100 deposits; `limit=0` and `limit=1001` → `400`.
+
+---
+
+## 7. AI harness (README requirement 6)
+
+Principle: **instructions are advice; hooks, tests and CI are enforcement.** Anything that must
+never break is guarded deterministically, not only described in a prompt. The whole harness is
+committed to the repo, so cloning it and running `claude` from the repo root reproduces it.
+
+### Structure
+
+```
+CLAUDE.md                          project memory: constraints, architecture, commands, workflow
+.gitattributes                     forces LF for *.sh (hooks run in Git Bash on Windows)
+.claude/
+├── settings.json                  shared permissions + hooks (committed)
+├── settings.local.json            personal overrides (gitignored)
+├── hooks/
+│   ├── protect-contract.sh        PreToolUse  — blocks edits to TimeDeposit.java
+│   ├── compile.sh                 PostToolUse — compiles after a .java edit
+│   └── run-unit-tests.sh          Stop        — unit tests must be green before the turn ends
+├── agents/
+│   ├── test-writer.md             writes behaviour/boundary tests, never touches main code
+│   └── architecture-reviewer.md   read-only review: hexagonal rules, SOLID, dead code, over-engineering
+└── skills/
+    └── add-plan-type/SKILL.md     playbook for adding a new interest plan (the extension point)
+docs/
+├── AI_USAGE.md                    tools, setup, config, which parts were AI-assisted and why
+└── adr/                           short decision records (added as decisions are implemented)
+.github/workflows/ci.yml           ./mvnw verify on push/PR (added with the Maven Wrapper)
+```
+
+### Components
+
+| Component | Role |
+|---|---|
+| `CLAUDE.md` | Loaded into every session: frozen contract, architecture map, commands, workflow rules. |
+| Permissions | Allow safe commands (`./mvnw`, read-only git, docker compose); `git commit` requires confirmation; `git push` denied. |
+| `PreToolUse` hook | Rejects Edit/Write on `TimeDeposit.java` (exit 2 + reason fed back to Claude). |
+| `PostToolUse` hook | Compiles after each `.java` edit so errors surface immediately. |
+| `Stop` hook | Runs `./mvnw test` when `java/` has uncommitted changes; red tests block the turn from ending. Guarded by `stop_hook_active` against loops. Testcontainers tests are left to `verify`/CI to keep it fast. |
+| Subagents | Fresh context, restricted role, return one report. `test-writer` (tests first), `architecture-reviewer` (diff review). Built-in `/code-review` covers correctness. |
+| `add-plan-type` skill | Repeatable procedure: boundary tests → strategy class → registration in `InterestStrategies.defaults()` → tests → review. |
+| CI | Same `./mvnw verify` on GitHub Actions (Docker available for Testcontainers). |
+
+Hooks no-op until `java/mvnw` exists, so the harness can be installed before the build is.
+
+### Working loop per plan step
+
+1. Plan mode — agree on the step.
+2. `test-writer` adds tests; human checks they fail/pass for the right reason.
+3. Implement — hooks give compile feedback and block contract edits.
+4. Stop hook enforces green unit tests.
+5. `architecture-reviewer` + `/code-review` on the diff; fix findings.
+6. Human reads every line and commits.
+
+Maintenance: new rules → `CLAUDE.md` or a hook; design decisions → ADR; recurring tasks → skill.
+
+### Deliberately not included
+
+MCP servers, multi-agent workflows, more than two custom agents, formatter tooling — no clear
+benefit at this size.
+
+---
+
+## 8. Implementation steps (each = one atomic commit, tests green after each)
+
+1. AI harness: `CLAUDE.md`, `.claude/` (settings, hooks, agents, skill), `docs/AI_USAGE.md`.
+2. Maven Wrapper; upgrade Surefire, add Failsafe + JaCoCo; update test dependencies; CI workflow.
+3. Characterization tests for `TimeDepositCalculator`.
+4. Extract `InterestStrategy` + plan strategies + `InterestStrategies.defaults()`; calculator
+   delegates (characterization tests unchanged & green); strategy unit tests.
+5. Spring Boot skeleton: parent, application class, configuration (`Clock`, calculator bean).
+6. Domain read models, ports, GET use case in `TimeDepositService` + tests.
+7. Balance-update use case (`TransactionRunner` port, chunked keyset loop) + tests.
+8. Flyway schema migration + `local`-profile seed + Testcontainers test setup.
+9. Persistence read adapter: HQL spike (fallbacks if needed), GET queries + tests.
+10. Persistence update adapter: locking native query, `saveAppliedInterest`, `TransactionRunner`
+    implementation + tests.
+11. Concurrency tests.
+12. OpenAPI contract, web adapter (`Link` header, validation), Swagger UI on the contract,
+    end-to-end tests.
+13. Documentation: README (run instructions, Swagger usage, assumptions, known limitations,
+    possible enhancements, demo reset), ADRs; finalize `docs/AI_USAGE.md`.
+14. Final pass: dead code removal, coverage review, full code review, full test suite run.
+
+---
+
+## 9. Decisions
+
+| # | Topic | Decision |
+|---|---|---|
+| 1 | Table/column naming | snake_case in the DB (`time_deposits`, `plan_type`, …); camelCase in the API (§4). |
+| 2 | POST response | `204 No Content`. |
+| 3 | Fields persisted by the update | `balance` + internal marker; `days` untouched — `updateBalance` behaviour preserved exactly. |
+| 4 | Database | PostgreSQL. |
+| 5 | AI harness | Claude Code; committed config (§7); set up first so it is used throughout. |
+| 6 | Money types | BigDecimal in DB/API/new classes; `double` only inside the frozen calculation (§2). |
+| 7 | Java / modules | Java 17 (existing pom.xml); single Maven module. |
+| 8 | Idempotency of balance update | `last_interest_applied_on` marker; due after 1 calendar month; advanced only when interest was applied; keyset cursor (§3). |
+| 9 | ArchUnit | Dropped for now (over-engineering at this size); possible enhancement (§11). |
+| 10 | Business time zone | `Clock` bean in `interest.business-zone`, default `UTC`. |
+| 11 | Persistence technology | Spring Data JPA; native SQL for the locking update query; `open-in-view=false` (§5). |
+| 12 | Locking | `FOR UPDATE SKIP LOCKED` per chunk; concurrent writers (incl. withdrawal inserts) wait until the chunk commits — intended; rows locked by others are processed next run; reads never block (MVCC). |
+| 13 | Backfilling missed months | Not implemented; problems and a possible direction documented in §3 — **to be discussed**. Listed in the README's known limitations. |
+| 14 | Parallel batch updates | Not implemented; single-threaded chunked run. Documented as a possible enhancement (§11). |
+| 15 | GET query | HQL fetch join ordered by deposit and withdrawal id; paginated variant limits deposit ids in a subquery (`IN (SELECT … LIMIT)`) → one SQL statement → one snapshot, no read skew; enforced by a test. Spike first; fallbacks: `EntityManager` HQL, then native SQL. |
+| 16 | PgBouncer | Not needed (instances × pool ≪ `max_connections`); possible enhancement (§11). |
+| 17 | GET pagination | Keyset, optional: `limit` (1–1000, generated validation → 400) + `afterId`; no params → all; same array body; `Link rel="next"` header; no total count. |
+| 18 | Strategy registration | Single source `InterestStrategies.defaults()`, used by the no-arg calculator and Spring config. |
+| 19 | Seed data | Separate Flyway location, `local` profile only; tests start from an empty schema. |
+| 20 | Ids | `GENERATED BY DEFAULT AS IDENTITY` (increasing ids for keyset stability). |
+| 21 | API tooling | Swagger UI serves the contract file; no Actuator; `planType` is a free string in the contract. |
+
+---
+
+## 10. Prerequisites
+
+- Docker Desktop running (required by Testcontainers and docker-compose).
+- Work in a personal fork: ✅ `origin` = `visya2000/time-deposit-take-home-kata` (public fork);
+  `upstream` = `ikigai-digital/time-deposit-take-home-kata` (fetch only, push disabled).
+- Claude Code installed; Git Bash available (used to run hooks on Windows).
+
+---
+
+## 11. Possible enhancements (not planned)
+
+- **Parallel batch updates** — the job is bound by DB round trips and commits, not app CPU, so
+  K workers would give a constant-factor speed-up until the DB saturates. Design: split
+  `[min(id), max(id)]` into K disjoint ranges (cursor `id > :afterId AND id <= :rangeEnd`),
+  one worker per range on a **shared fixed-size executor** (caps update connections at K even
+  with concurrent POSTs; Java 17 → platform threads), `interest.update.parallelism` validated
+  `< pool size` at startup so GET requests are not starved. Correctness is unchanged (marker +
+  `SKIP LOCKED`). Measure throughput first (single worker vs. K), noting that laptop
+  measurements are not representative of production.
+- **Asynchronous update** — `202 Accepted` + background processing removes the HTTP-timeout
+  risk; needs no extra endpoint, since clients observe results via GET.
+- **Backfilling missed months** — §3 (to be discussed).
+- **Days-range filtering/paging** — order by `(days, id)` with a composite index `(days, id)`;
+  keyset condition `(days, id) > (:afterDays, :afterId)` plus
+  `days BETWEEN :minDays AND :maxDays` → index range scan, constant cost per page (filtering by
+  days while ordering by `id` is not constant cost). In the HQL subquery:
+  `(d2.days > :afterDays OR (d2.days = :afterDays AND d2.id > :afterId)) ORDER BY d2.days, d2.id`,
+  outer `ORDER BY d.days, d.id`; check with `EXPLAIN`. Two-value cursor → opaque `cursor`
+  parameter (clients following the `Link` URL are unaffected). Caveat: `days` is mutable — a row
+  whose `days` grows between requests can appear twice; mitigate by client de-duplication by
+  `id`, or long term store an immutable `opened_on` date and page on it. Indexing `days` makes
+  the external daily `days` update non-HOT.
+- **Audit trail** — an `interest_postings` table (deposit, date, amount), partitioned by period
+  if it grows.
+- **Exact decimal interest maths** — business decision (changes balances by a cent in edge
+  cases); contained to strategies + calculator (ADR).
+- **ArchUnit** — automated dependency-direction rules once the codebase or team grows.
+- **PgBouncer** — when instances × pool size approaches `max_connections`; the design only uses
+  transaction-scoped row locks, so it is compatible with transaction pooling.
