@@ -82,6 +82,7 @@ CI runs `./mvnw verify` on every push to `main` and on pull requests.
 | Strategy / service unit tests | Each plan's rule; a custom plan added through the extension point (`TimeDepositCalculatorStrategiesTest`); the balance-update run with in-memory fakes (chunks, idempotency, calendar months, failures, time zones, back-filling missed months); `InterestSchedule`, `Cents` |
 | Persistence ITs | Schema, seed, single-statement GET, keyset pagination, due filter in SQL, markers per deposit; `BalanceBackfillIT`: catch-up end to end |
 | `BalanceUpdateConcurrencyIT` | Parallel runs, non-blocking reads, `SKIP LOCKED`, no lost update |
+| `BalanceUpdateRollbackIT` | A database failure in the middle of a chunk rolls back the whole chunk in PostgreSQL (incl. an UPDATE already executed); earlier chunks stay committed; a re-run posts the rest once |
 | `TimeDepositApiIT` | Both endpoints over HTTP, `Link` header, validation, Swagger UI |
 
 ## Architecture

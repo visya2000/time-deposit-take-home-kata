@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–16 implemented; step 17 (DB rollback test) planned (see §8).
+Status: **complete** — all steps 1–17 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -653,11 +653,13 @@ not a "replace this resource" operation, so `PUT` would be misleading.
      on top of the new balance (no lost update);
    - **mid-chunk rollback in the database (step 17)**: the service-level failure test uses the
      in-memory fake and fails before any write; this one proves a real PostgreSQL rollback of an
-     UPDATE already executed inside the chunk. Real wiring, no test doubles: chunk size 2,
-     deposits 1–6 eligible (chunks {1,2}, {3,4}, {5,6}); a test-created trigger raises an error
-     on the UPDATE of deposit 4, so at the chunk's flush deposit 3's UPDATE runs and deposit 4's
-     fails (`order_updates`). Asserted in the database: the run fails; 1 and 2 keep interest and
-     marker (committed chunk); 3 is unchanged (its executed UPDATE rolled back); 4–6 unchanged.
+     UPDATE already executed inside the chunk. Real adapters and database (only the clock is
+     fixed): chunk size 2, deposits 1–6 eligible (chunks {1,2}, {3,4}, {5,6}); a test-created
+     trigger raises an error on the UPDATE of deposit 4, so at the chunk's flush deposit 3's UPDATE
+     runs and deposit 4's fails (`order_updates`); the trigger also counts every executed UPDATE in
+     a sequence (not rolled back) as a witness. Asserted in the database: the run fails; 4 UPDATEs
+     were executed; 1 and 2 keep interest and marker (committed chunk); 3 is unchanged (its
+     executed UPDATE rolled back); 4–6 unchanged.
      After dropping the trigger a re-run posts every deposit exactly once (no double posting).
 6. **End-to-end tests** — `@SpringBootTest` + Testcontainers, over HTTP:
    - GET returns the README schema; empty DB → `[]`;
