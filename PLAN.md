@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–2 implemented (see §8).
+Status: **in progress** — steps 1–3 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -510,7 +510,10 @@ not a "replace this resource" operation, so `PUT` would be misleading.
    - the original test's scenario as a real assertion: basic, 1,234,567.00, 45 days →
      **1,235,595.81**;
    - a HALF_UP boundary where `double` differs from exact decimal maths:
-     basic 18.00 → **18.01** (exact maths would give 18.02);
+     basic 18.00 → **18.01** (exact maths would give 18.02); plus one rounding edge per plan that
+     also catches a reordered expression (`balance * (rate / 12)`, `balance / 12 * rate`):
+     basic 30.00 → **30.02**, student 10.00 → **10.02**, premium 162.00 → **162.67**;
+   - basic and premium have no upper day limit (400 days still earns interest);
    - empty list; mixed list — each deposit updated independently;
    - non-balance fields untouched.
 2. **Strategy unit tests** — only each plan's own boundaries; no duplication of (1).
