@@ -25,6 +25,9 @@ public class TimeDepositService implements GetAllTimeDepositsUseCase, UpdateAllB
 
     public TimeDepositService(TimeDepositRepository repository, TransactionRunner transactionRunner,
                               TimeDepositCalculator calculator, Clock clock, int chunkSize) {
+        if (chunkSize < 1) {
+            throw new IllegalArgumentException("chunk size must be at least 1, was " + chunkSize);
+        }
         this.repository = repository;
         this.transactionRunner = transactionRunner;
         this.calculator = calculator;

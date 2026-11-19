@@ -8,6 +8,7 @@ import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,6 +26,9 @@ class TimeDepositEntity {
     private int days;
 
     private BigDecimal balance;
+
+    // Internal scheduling marker of the balance update (PLAN.md §3); not exposed by the API.
+    private LocalDate lastInterestAppliedOn;
 
     // Unidirectional, loaded only by the GET fetch join.
     @OneToMany(fetch = FetchType.LAZY)
@@ -53,5 +57,11 @@ class TimeDepositEntity {
 
     List<WithdrawalEntity> getWithdrawals() {
         return withdrawals;
+    }
+
+    /** The only state change the application makes: flushed by dirty checking on commit. */
+    void applyInterest(BigDecimal newBalance, LocalDate appliedOn) {
+        this.balance = newBalance;
+        this.lastInterestAppliedOn = appliedOn;
     }
 }

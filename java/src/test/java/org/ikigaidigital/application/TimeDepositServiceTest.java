@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -31,6 +32,36 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TimeDepositServiceTest {
 
     private static final int CHUNK_SIZE = 2;
+
+    /** Chunk size is configuration: below 1 every run would be a silent no-op (PLAN.md §8 step 10). */
+    @Nested
+    class Construction {
+
+        private final InMemoryTimeDepositRepository repository = new InMemoryTimeDepositRepository();
+
+        @ParameterizedTest(name = "chunk size {0}")
+        @ValueSource(ints = {0, -1})
+        void rejectsChunkSizeBelowOne(int chunkSize) {
+            assertThatThrownBy(() -> serviceWithChunkSize(chunkSize))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @Test
+        void chunkSizeOne_isAccepted_andAppliesInterestToEveryDueDeposit() {
+            repository.add(1, "basic", "1200.00", 31);
+            repository.add(2, "basic", "1200.00", 31);
+
+            serviceWithChunkSize(1).updateAllBalances();
+
+            assertThat(List.of(repository.balanceOf(1), repository.balanceOf(2)))
+                    .containsExactly(new BigDecimal("1201.00"), new BigDecimal("1201.00"));
+        }
+
+        private TimeDepositService serviceWithChunkSize(int chunkSize) {
+            return new TimeDepositService(repository, new InMemoryTransactionRunner(repository),
+                    new TimeDepositCalculator(), Clock.systemUTC(), chunkSize);
+        }
+    }
 
     @Nested
     class GetAll {

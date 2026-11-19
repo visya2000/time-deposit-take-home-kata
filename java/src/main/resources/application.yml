@@ -1,6 +1,9 @@
 interest:
   # Zone in which business dates (e.g. when interest was last applied) are computed.
   business-zone: UTC
+  update:
+    # Deposits locked and updated per transaction by the balance update.
+    chunk-size: 500
 
 # The datasource is configured per environment (SPRING_DATASOURCE_* variables, or the local
 # profile); tests use Testcontainers.

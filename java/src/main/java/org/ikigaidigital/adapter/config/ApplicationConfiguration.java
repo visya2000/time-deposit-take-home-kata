@@ -1,6 +1,9 @@
 package org.ikigaidigital.adapter.config;
 
 import org.ikigaidigital.TimeDepositCalculator;
+import org.ikigaidigital.application.TimeDepositService;
+import org.ikigaidigital.application.port.out.TimeDepositRepository;
+import org.ikigaidigital.application.port.out.TransactionRunner;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -8,7 +11,7 @@ import org.springframework.context.annotation.Configuration;
 import java.time.Clock;
 import java.time.ZoneId;
 
-/** Wires the plain-Java domain objects; the domain itself has no Spring annotations. */
+/** Wires the plain-Java domain and application objects; they have no Spring annotations. */
 @Configuration
 public class ApplicationConfiguration {
 
@@ -25,5 +28,13 @@ public class ApplicationConfiguration {
     @Bean
     public TimeDepositCalculator timeDepositCalculator() {
         return new TimeDepositCalculator();
+    }
+
+    @Bean
+    public TimeDepositService timeDepositService(TimeDepositRepository repository,
+                                                 TransactionRunner transactionRunner,
+                                                 TimeDepositCalculator calculator, Clock clock,
+                                                 @Value("${interest.update.chunk-size}") int chunkSize) {
+        return new TimeDepositService(repository, transactionRunner, calculator, clock, chunkSize);
     }
 }

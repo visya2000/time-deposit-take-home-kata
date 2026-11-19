@@ -1,6 +1,6 @@
 # Implementation Plan — Time Deposit Kata (Java)
 
-Status: **in progress** — steps 1–9 implemented (see §8).
+Status: **in progress** — steps 1–10 implemented (see §8).
 
 Approach: Requirements → code analysis → identify issues → tests → coverage review → refactoring →
 architecture & dependency review → dead code removal → final code review → full test suite run.
@@ -652,8 +652,8 @@ benefit at this size.
 10. Persistence update adapter: locking native query, `saveAppliedInterest`, `TransactionRunner`
     implementation + tests. The IT must pin the SQL due filter: marker `NULL` and `= cutoff` are
     due, `cutoff + 1 day` is not (the service tests only prove the cutoff is computed correctly).
-    Bind `interest.update.chunk-size` with a minimum of 1 (configuration, not request input:
-    `0` would make every run a silent no-op).
+    `interest.update.chunk-size` (default 500) must be at least 1 — checked by the service
+    constructor, so startup fails (configuration, not request input: `0` would be a silent no-op).
 11. Concurrency tests.
 12. OpenAPI contract, web adapter (`Link` header, validation), Swagger UI on the contract,
     end-to-end tests.
